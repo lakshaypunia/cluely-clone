@@ -1,8 +1,22 @@
-import { contextBridge } from 'electron'
+import { contextBridge, ipcRenderer } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 
+interface CaptureResult {
+  dataUrl: string
+  width: number
+  height: number
+  timestamp: number
+}
+
+type ChatResult = { reply: string } | { error: string }
+
 // Custom APIs for renderer
-const api = {}
+const api = {
+  captureScreen: (): Promise<CaptureResult | null> => ipcRenderer.invoke('capture:screen'),
+  sendChatMessage: (message: string, includeScreenshot: boolean): Promise<ChatResult> =>
+    ipcRenderer.invoke('chat:send', { message, includeScreenshot }),
+  toggleMinimize: (): void => ipcRenderer.send('overlay:toggle-minimize')
+}
 
 // Use `contextBridge` APIs to expose Electron APIs to
 // renderer only if context isolation is enabled, otherwise
