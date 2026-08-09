@@ -13,7 +13,10 @@ import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 
 let overlayWindow: BrowserWindow | null = null
-let overlayInteractive = false
+// Interactive by default so the chat is usable immediately without needing
+// Ctrl/Cmd+Shift+I first; that shortcut still toggles it into click-through
+// afterwards for whenever it needs to stay out of the way.
+let overlayInteractive = true
 let overlayMinimized = false
 
 interface CaptureResult {
@@ -30,8 +33,15 @@ type ChatResult = { reply: string } | { error: string }
 const CAPTURE_MAX_WIDTH = 1280
 const capturesDir = join(app.getPath('userData'), 'captures')
 
-const EXPANDED_BOUNDS = { width: 380, height: 540 }
-const DOT_SIZE = 36
+const DEFAULT_EXPANDED_BOUNDS = { width: 340, height: 460 }
+const MIN_EXPANDED_BOUNDS = { width: 280, height: 320 }
+const MAX_EXPANDED_BOUNDS = { width: 640, height: 820 }
+const DOT_SIZE = 18
+
+// Tracks whatever size the user last resized the expanded panel to, so
+// minimizing and then maximizing again restores that size instead of
+// snapping back to the default.
+let expandedBounds = { ...DEFAULT_EXPANDED_BOUNDS }
 const CHAT_SERVER_URL = process.env.CLUELY_CHAT_SERVER_URL ?? 'http://localhost:4319/api/chat'
 
 async function captureScreen(): Promise<CaptureResult | null> {
@@ -77,13 +87,7 @@ async function triggerCaptureFromShortcut(): Promise<void> {
   overlayWindow.webContents.send('capture:result', result)
 }
 
-async function sendChatMessage(message: string, includeScreenshot: boolean): Promise<ChatResult> {
-  let screenshot: string | undefined
-  if (includeScreenshot) {
-    const capture = await captureScreen()
-    screenshot = capture?.dataUrl
-  }
-
+async function sendChatMessage(message: string, screenshot?: string): Promise<ChatResult> {
   try {
     const response = await fetch(CHAT_SERVER_URL, {
       method: 'POST',
@@ -136,14 +140,14 @@ function createWindow(): void {
 
 function createOverlayWindow(): void {
   overlayWindow = new BrowserWindow({
-    width: EXPANDED_BOUNDS.width,
-    height: EXPANDED_BOUNDS.height,
+    width: expandedBounds.width,
+    height: expandedBounds.height,
     x: 80,
     y: 60,
     frame: false,
     transparent: true,
     hasShadow: false,
-    resizable: false,
+    resizable: true,
     fullscreenable: false,
     skipTaskbar: true,
     alwaysOnTop: true,
@@ -155,6 +159,19 @@ function createOverlayWindow(): void {
     }
   })
 
+  overlayWindow.setMinimumSize(MIN_EXPANDED_BOUNDS.width, MIN_EXPANDED_BOUNDS.height)
+  overlayWindow.setMaximumSize(MAX_EXPANDED_BOUNDS.width, MAX_EXPANDED_BOUNDS.height)
+
+  // Keep track of manual resizes so minimize -> maximize restores the size
+  // the user actually left it at, not the hardcoded default. Only applies
+  // while expanded — while minimized, overlayMinimized guards this, since
+  // the animated shrink/grow itself also fires 'resize' events.
+  overlayWindow.on('resize', () => {
+    if (!overlayWindow || overlayMinimized) return
+    const bounds = overlayWindow.getBounds()
+    expandedBounds = { width: bounds.width, height: bounds.height }
+  })
+
   // Float above fullscreen apps and follow the user across virtual desktops.
   overlayWindow.setAlwaysOnTop(true, 'screen-saver')
   overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
@@ -162,8 +179,9 @@ function createOverlayWindow(): void {
   // Phase 2: exclude this window from OS-level screen capture (see plan.md).
   overlayWindow.setContentProtection(true)
 
-  // Phase 3: click-through by default so the overlay never blocks the app underneath.
-  overlayWindow.setIgnoreMouseEvents(true, { forward: true })
+  // Interactive by default (see overlayInteractive above) — click-through
+  // only kicks in once the user toggles it via Ctrl/Cmd+Shift+I.
+  overlayWindow.setIgnoreMouseEvents(!overlayInteractive, { forward: true })
 
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
     overlayWindow.loadURL(`${process.env['ELECTRON_RENDERER_URL']}?overlay=1`)
@@ -248,6 +266,12 @@ function toggleOverlayMinimize(): void {
   const current = overlayWindow.getBounds()
 
   if (overlayMinimized) {
+    // Size constraints must be loosened to the dot's size *before* animating
+    // down, otherwise the still-active expanded minimum size would clamp
+    // every intermediate setBounds call during the shrink.
+    overlayWindow.setMinimumSize(DOT_SIZE, DOT_SIZE)
+    overlayWindow.setMaximumSize(DOT_SIZE, DOT_SIZE)
+    overlayWindow.setResizable(false)
     animateWindowBounds(overlayWindow, {
       x: current.x,
       y: current.y,
@@ -258,8 +282,11 @@ function toggleOverlayMinimize(): void {
     // clickable/draggable regardless of the separate interactive/click-through mode.
     overlayWindow.setIgnoreMouseEvents(false)
   } else {
-    const anchor = clampToDisplay(current, EXPANDED_BOUNDS.width, EXPANDED_BOUNDS.height)
-    animateWindowBounds(overlayWindow, { ...anchor, ...EXPANDED_BOUNDS })
+    overlayWindow.setResizable(true)
+    overlayWindow.setMinimumSize(MIN_EXPANDED_BOUNDS.width, MIN_EXPANDED_BOUNDS.height)
+    overlayWindow.setMaximumSize(MAX_EXPANDED_BOUNDS.width, MAX_EXPANDED_BOUNDS.height)
+    const anchor = clampToDisplay(current, expandedBounds.width, expandedBounds.height)
+    animateWindowBounds(overlayWindow, { ...anchor, ...expandedBounds })
     overlayWindow.setIgnoreMouseEvents(!overlayInteractive, { forward: true })
   }
 
@@ -287,8 +314,8 @@ app.whenReady().then(() => {
   // in interactive mode), in addition to the global shortcut below.
   ipcMain.handle('capture:screen', () => captureScreen())
 
-  ipcMain.handle('chat:send', (_event, payload: { message: string; includeScreenshot: boolean }) =>
-    sendChatMessage(payload.message, payload.includeScreenshot)
+  ipcMain.handle('chat:send', (_event, payload: { message: string; screenshot?: string }) =>
+    sendChatMessage(payload.message, payload.screenshot)
   )
 
   ipcMain.on('overlay:toggle-minimize', () => toggleOverlayMinimize())

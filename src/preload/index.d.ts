@@ -11,7 +11,7 @@ type ChatResult = { reply: string } | { error: string }
 
 interface Api {
   captureScreen: () => Promise<CaptureResult | null>
-  sendChatMessage: (message: string, includeScreenshot: boolean) => Promise<ChatResult>
+  sendChatMessage: (message: string, screenshot?: string) => Promise<ChatResult>
   toggleMinimize: () => void
 }
 

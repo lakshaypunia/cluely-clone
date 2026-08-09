@@ -113,6 +113,85 @@ Not one of the numbered research phases — tracked separately here.
 
 ---
 
+## Dot click/style fix — 2026-08-09
+- [x] Fixed: minimized dot wasn't reopening on click. Root cause — the dot is
+      a `-webkit-app-region: drag` element (needed so it can be dragged as a
+      tiny window), and Electron/Chromium generally swallows the normal
+      `click` event on drag regions before it reaches the DOM. Replaced
+      `onClick` with manual `mousedown`/`mouseup` timing+movement detection
+      (`<500ms`, `<6px` movement = a click) in `OverlayApp.tsx`, applied to
+      both the minimized dot and the expanded titlebar dot — 2026-08-09
+- [x] Shrunk `DOT_SIZE` from 36 to 18px in `src/main/index.ts` — 2026-08-09
+- [x] Minimized dot no longer color-codes interactive state — flat, mostly
+      transparent (`rgba(255,255,255,0.05)` fill, faint border), matches
+      "just visible" — 2026-08-09
+- [x] Typecheck + lint clean, dev app rebuilt and relaunched — 2026-08-09
+- [ ] Manual re-verification needed: click should now reliably reopen the
+      dot; confirm it's noticeably smaller and effectively invisible until
+      hovered/interacted with
+
+## UI simplification pass — 2026-08-09
+Stripped the overlay down to just chat, per request — no more visible status
+text, shortcut hints, or the separate capture-exclusion demo panel.
+
+- [x] Removed "Overlay" title + "Interactive/Click-through — Ctrl/Cmd+Shift+I"
+      text from the titlebar — titlebar is now just the (still-functional)
+      dot, no label — 2026-08-09
+- [x] Removed the standalone "Capture-exclusion demo" `<details>` section
+      (preview image + "Capture now" button) from the overlay UI. The
+      underlying `captureScreen()` pipeline, the `Ctrl/Cmd+Shift+S` hotkey,
+      and PNGs saved to `<userData>/captures/` are untouched — only the
+      on-screen demo panel is gone. Verifying capture exclusion is still
+      meant to happen externally (OBS / `getDisplayMedia` test page /
+      screenshot tool), not via an in-app preview — 2026-08-09
+- [x] Replaced the checkbox+button composer row with two small icon buttons
+      (camera toggle for "attach screenshot", arrow to send) — 2026-08-09
+- [x] Shrunk `EXPANDED_BOUNDS` from 380×540 to 340×460 to match the leaner
+      content — 2026-08-09
+- [x] Screenshots are now shown inline in the chat: the screenshot is
+      captured client-side in the renderer *before* the message is added to
+      the list (not inside the main-process `sendChatMessage`), so the exact
+      image sent is rendered as a small thumbnail in the user's bubble.
+      `sendChatMessage(message, screenshot?)` now takes the data URL directly
+      instead of an `includeScreenshot` boolean and capturing it itself — 2026-08-09
+- [x] Typecheck + lint clean, dev app rebuilt and relaunched — 2026-08-09
+- [ ] Manual verification needed: send a plain message, then send one with
+      the camera toggle on — confirm a small thumbnail appears above the
+      message text in your own bubble, and the reply still comes back
+
+## Interactive by default — 2026-08-09
+- [x] `overlayInteractive` now starts `true` and the initial
+      `setIgnoreMouseEvents` call in `createOverlayWindow` uses it, so the
+      overlay is clickable/typeable immediately on launch — no more needing
+      `Ctrl/Cmd+Shift+I` first. That shortcut still toggles it into
+      click-through afterwards, same as before — 2026-08-09
+- [x] Typecheck + lint clean, dev app rebuilt and relaunched — 2026-08-09
+- [ ] Manual verification: on a fresh launch, click straight into the chat
+      input without pressing any shortcut first and confirm it accepts focus
+
+## Resizable panel + grab cursor — 2026-08-09
+- [x] `.overlay-titlebar` and `.overlay-dot-standalone` (the drag regions)
+      now show `cursor: grab`, switching to `grabbing` while the mouse button
+      is down — 2026-08-09
+- [x] Overlay window is now `resizable: true` (was `false`). Edge-drag resize
+      relies on Electron's built-in frameless-window hit-testing, no extra
+      code needed for that part — 2026-08-09
+- [x] Added `setMinimumSize`/`setMaximumSize` (280×320 to 640×820 while
+      expanded) so the chat layout can't be resized into something broken or
+      absurdly large — 2026-08-09
+- [x] The expanded size is now tracked in a mutable `expandedBounds`
+      (updated on every `resize` event while not minimized) instead of a
+      fixed constant, so minimizing then maximizing restores whatever size
+      you last resized to, rather than snapping back to the 340×460 default — 2026-08-09
+- [x] Size constraints + `setResizable` are flipped *before* each
+      minimize/maximize animation starts (not after) — otherwise the
+      still-active expanded minimum size would clamp the shrink animation,
+      or the dot-sized constraint would clamp the grow animation — 2026-08-09
+- [x] Typecheck + lint clean, dev app rebuilt and relaunched — 2026-08-09
+- [ ] Manual verification: drag an edge/corner of the expanded panel to
+      resize it, confirm the grab cursor shows over the titlebar/dot, and
+      confirm minimize → maximize restores the resized size (not the default)
+
 ## Next up
 Waiting on the manual verification pass above. After that: Phase 5 (capture-
 exclusion test methodology — the `getDisplayMedia()` test page) is still the

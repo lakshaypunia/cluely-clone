@@ -13,8 +13,8 @@ type ChatResult = { reply: string } | { error: string }
 // Custom APIs for renderer
 const api = {
   captureScreen: (): Promise<CaptureResult | null> => ipcRenderer.invoke('capture:screen'),
-  sendChatMessage: (message: string, includeScreenshot: boolean): Promise<ChatResult> =>
-    ipcRenderer.invoke('chat:send', { message, includeScreenshot }),
+  sendChatMessage: (message: string, screenshot?: string): Promise<ChatResult> =>
+    ipcRenderer.invoke('chat:send', { message, screenshot }),
   toggleMinimize: (): void => ipcRenderer.send('overlay:toggle-minimize')
 }
 
