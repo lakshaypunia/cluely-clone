@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 
 interface ChatMessage {
   id: string
@@ -6,7 +8,13 @@ interface ChatMessage {
   text: string
   screenshotDataUrl?: string
   timestamp: number
+  streaming?: boolean
 }
+
+type ChatStreamEvent =
+  | { requestId: string; type: 'delta'; text: string }
+  | { requestId: string; type: 'done' }
+  | { requestId: string; type: 'error'; message: string }
 
 let messageIdCounter = 0
 function nextMessageId(): string {
@@ -40,6 +48,22 @@ function SendIcon(): React.JSX.Element {
   )
 }
 
+function CrossIcon(): React.JSX.Element {
+  return (
+    <svg
+      width="11"
+      height="11"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.5"
+      strokeLinecap="round"
+    >
+      <path d="M5 5l14 14M19 5L5 19" />
+    </svg>
+  )
+}
+
 function OverlayApp(): React.JSX.Element {
   const [minimized, setMinimized] = useState(false)
 
@@ -49,6 +73,19 @@ function OverlayApp(): React.JSX.Element {
   const [sending, setSending] = useState(false)
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const messagesContainerRef = useRef<HTMLDivElement>(null)
+  // Only auto-scroll while the user is already at (or near) the bottom, so
+  // scrolling up to read a past message — including mid-stream — doesn't
+  // get yanked back down by every incoming chunk. Starts true so the first
+  // message and normal sends still scroll into view.
+  const isPinnedToBottomRef = useRef(true)
+
+  const handleMessagesScroll = (): void => {
+    const el = messagesContainerRef.current
+    if (!el) return
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+    isPinnedToBottomRef.current = distanceFromBottom < 60
+  }
 
   useEffect(() => {
     const minimizedHandler = (_event: unknown, value: boolean): void => setMinimized(value)
@@ -59,8 +96,42 @@ function OverlayApp(): React.JSX.Element {
   }, [])
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    if (isPinnedToBottomRef.current) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'instant' })
+    }
   }, [messages])
+
+  useEffect(() => {
+    const handler = (_event: unknown, data: ChatStreamEvent): void => {
+      if (data.type === 'delta') {
+        setMessages((prev) =>
+          prev.map((m) => (m.id === data.requestId ? { ...m, text: m.text + data.text } : m))
+        )
+      } else if (data.type === 'done') {
+        setMessages((prev) =>
+          prev.map((m) => (m.id === data.requestId ? { ...m, streaming: false } : m))
+        )
+        setSending(false)
+      } else if (data.type === 'error') {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === data.requestId
+              ? {
+                  ...m,
+                  text: m.text ? `${m.text}\n\n⚠ ${data.message}` : `⚠ ${data.message}`,
+                  streaming: false
+                }
+              : m
+          )
+        )
+        setSending(false)
+      }
+    }
+    window.electron.ipcRenderer.on('chat:stream-event', handler)
+    return () => {
+      window.electron.ipcRenderer.removeListener('chat:stream-event', handler)
+    }
+  }, [])
 
   // The dot is a native OS drag region (needed so it can be dragged around
   // as a tiny window), and Electron/Chromium generally does not deliver a
@@ -90,35 +161,37 @@ function OverlayApp(): React.JSX.Element {
 
     setInput('')
     setSending(true)
+    // Sending your own message should always land at the bottom, even if
+    // you'd scrolled up to read something earlier.
+    isPinnedToBottomRef.current = true
 
-    try {
-      // Capture client-side first so the thumbnail shown in the bubble is
-      // exactly the image that gets sent to the server, not a second,
-      // separate capture.
-      const screenshotDataUrl = attachScreenshot
-        ? ((await window.api.captureScreen())?.dataUrl ?? undefined)
-        : undefined
+    // Capture client-side first so the thumbnail shown in the bubble is
+    // exactly the image that gets sent to the server, not a second,
+    // separate capture.
+    const screenshotDataUrl = attachScreenshot
+      ? ((await window.api.captureScreen())?.dataUrl ?? undefined)
+      : undefined
 
-      const userMessage: ChatMessage = {
-        id: nextMessageId(),
-        role: 'user',
-        text,
-        screenshotDataUrl,
-        timestamp: Date.now()
-      }
-      setMessages((prev) => [...prev, userMessage])
-
-      const result = await window.api.sendChatMessage(text, screenshotDataUrl)
-      const replyMessage: ChatMessage = {
-        id: nextMessageId(),
-        role: 'assistant',
-        text: 'error' in result ? `⚠ ${result.error}` : result.reply,
-        timestamp: Date.now()
-      }
-      setMessages((prev) => [...prev, replyMessage])
-    } finally {
-      setSending(false)
+    const userMessage: ChatMessage = {
+      id: nextMessageId(),
+      role: 'user',
+      text,
+      screenshotDataUrl,
+      timestamp: Date.now()
     }
+    const assistantId = nextMessageId()
+    const assistantMessage: ChatMessage = {
+      id: assistantId,
+      role: 'assistant',
+      text: '',
+      timestamp: Date.now(),
+      streaming: true
+    }
+    setMessages((prev) => [...prev, userMessage, assistantMessage])
+
+    // Fire-and-forget — the reply streams back via 'chat:stream-event',
+    // handled by the listener above, keyed on assistantId as the requestId.
+    window.api.sendChatMessageStream(assistantId, text, screenshotDataUrl)
   }
 
   const handleComposerKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>): void => {
@@ -146,9 +219,12 @@ function OverlayApp(): React.JSX.Element {
           onMouseDown={handleDotMouseDown}
           onMouseUp={handleDotMouseUp}
         />
+        <button className="overlay-close-btn" onClick={() => window.api.quitApp()} title="Quit">
+          <CrossIcon />
+        </button>
       </div>
 
-      <div className="overlay-messages">
+      <div className="overlay-messages" ref={messagesContainerRef} onScroll={handleMessagesScroll}>
         {messages.length === 0 && <div className="overlay-empty">Ask anything…</div>}
         {messages.map((message) => (
           <div key={message.id} className={`overlay-bubble overlay-bubble-${message.role}`}>
@@ -159,7 +235,17 @@ function OverlayApp(): React.JSX.Element {
                 alt="Screenshot"
               />
             )}
-            <p>{message.text}</p>
+            {message.streaming && message.text === '' ? (
+              <span className="overlay-typing-inline">
+                <span className="overlay-typing-dot" />
+                <span className="overlay-typing-dot" />
+                <span className="overlay-typing-dot" />
+              </span>
+            ) : (
+              <div className="overlay-markdown">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.text}</ReactMarkdown>
+              </div>
+            )}
           </div>
         ))}
         <div ref={messagesEndRef} />

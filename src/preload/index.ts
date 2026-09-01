@@ -8,14 +8,15 @@ interface CaptureResult {
   timestamp: number
 }
 
-type ChatResult = { reply: string } | { error: string }
-
 // Custom APIs for renderer
 const api = {
   captureScreen: (): Promise<CaptureResult | null> => ipcRenderer.invoke('capture:screen'),
-  sendChatMessage: (message: string, screenshot?: string): Promise<ChatResult> =>
-    ipcRenderer.invoke('chat:send', { message, screenshot }),
-  toggleMinimize: (): void => ipcRenderer.send('overlay:toggle-minimize')
+  // Fire-and-forget: progress arrives via 'chat:stream-event' IPC events
+  // (delta/done/error), keyed by requestId, not this call's return value.
+  sendChatMessageStream: (requestId: string, message: string, screenshot?: string): void =>
+    ipcRenderer.send('chat:send-stream', { requestId, message, screenshot }),
+  toggleMinimize: (): void => ipcRenderer.send('overlay:toggle-minimize'),
+  quitApp: (): void => ipcRenderer.send('app:quit')
 }
 
 // Use `contextBridge` APIs to expose Electron APIs to

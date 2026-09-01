@@ -10,7 +10,6 @@ import {
 import { join } from 'path'
 import { mkdir, writeFile } from 'fs/promises'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
-import icon from '../../resources/icon.png?asset'
 
 let overlayWindow: BrowserWindow | null = null
 // Interactive by default so the chat is usable immediately without needing
@@ -26,7 +25,10 @@ interface CaptureResult {
   timestamp: number
 }
 
-type ChatResult = { reply: string } | { error: string }
+type ChatStreamEvent =
+  | { requestId: string; type: 'delta'; text: string }
+  | { requestId: string; type: 'done' }
+  | { requestId: string; type: 'error'; message: string }
 
 // Downscale before the image ever leaves this process — smaller payloads for
 // the test server, and less to store on disk.
@@ -43,6 +45,7 @@ const DOT_SIZE = 18
 // snapping back to the default.
 let expandedBounds = { ...DEFAULT_EXPANDED_BOUNDS }
 const CHAT_SERVER_URL = process.env.CLUELY_CHAT_SERVER_URL ?? 'http://localhost:4319/api/chat'
+const CHAT_STREAM_SERVER_URL = `${CHAT_SERVER_URL}/stream`
 
 async function captureScreen(): Promise<CaptureResult | null> {
   const display = screen.getPrimaryDisplay()
@@ -87,55 +90,93 @@ async function triggerCaptureFromShortcut(): Promise<void> {
   overlayWindow.webContents.send('capture:result', result)
 }
 
-async function sendChatMessage(message: string, screenshot?: string): Promise<ChatResult> {
+// Streams a chat reply from the server (SSE) and relays each piece to the
+// renderer over IPC as it arrives, keyed by requestId so concurrent/stale
+// streams can't clobber each other. Fire-and-forget from the caller's side —
+// progress goes out via `chat:stream-event`, not a return value.
+async function streamChatMessage(
+  sender: Electron.WebContents,
+  requestId: string,
+  message: string,
+  screenshot?: string
+): Promise<void> {
+  let finished = false
+  const emit = (event: ChatStreamEvent): void => {
+    if (event.type !== 'delta') {
+      if (finished) return
+      finished = true
+    }
+    if (!sender.isDestroyed()) sender.send('chat:stream-event', event)
+  }
+
+  let response: Response
   try {
-    const response = await fetch(CHAT_SERVER_URL, {
+    response = await fetch(CHAT_STREAM_SERVER_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message, screenshot })
     })
-    if (!response.ok) {
-      throw new Error(`Server responded ${response.status}`)
-    }
-    const data = (await response.json()) as { reply?: string }
-    return { reply: data.reply ?? '(empty reply)' }
   } catch (error) {
-    const messageText =
-      error instanceof Error ? error.message : 'Unknown error contacting chat server'
-    return { error: `${messageText} — is the test server running (\`npm run test-server\`)?` }
+    const text = error instanceof Error ? error.message : 'Unknown error contacting chat server'
+    emit({
+      requestId,
+      type: 'error',
+      message: `${text} — is the test server running (\`npm run test-server\`)?`
+    })
+    return
   }
-}
 
-function createWindow(): void {
-  // Create the browser window.
-  const mainWindow = new BrowserWindow({
-    width: 900,
-    height: 670,
-    show: false,
-    autoHideMenuBar: true,
-    ...(process.platform === 'linux' ? { icon } : {}),
-    webPreferences: {
-      preload: join(__dirname, '../preload/index.js'),
-      sandbox: false
+  if (!response.ok || !response.body) {
+    emit({ requestId, type: 'error', message: `Server responded ${response.status}` })
+    return
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+
+      let sepIndex: number
+      while ((sepIndex = buffer.indexOf('\n\n')) !== -1) {
+        const rawEvent = buffer.slice(0, sepIndex)
+        buffer = buffer.slice(sepIndex + 2)
+
+        let eventName = 'message'
+        let dataStr = ''
+        for (const line of rawEvent.split('\n')) {
+          if (line.startsWith('event:')) eventName = line.slice(6).trim()
+          else if (line.startsWith('data:')) dataStr += line.slice(5).trim()
+        }
+        if (!dataStr) continue
+
+        let data: { text?: string; message?: string }
+        try {
+          data = JSON.parse(dataStr)
+        } catch {
+          continue
+        }
+
+        if (eventName === 'delta' && data.text) {
+          emit({ requestId, type: 'delta', text: data.text })
+        } else if (eventName === 'error') {
+          emit({ requestId, type: 'error', message: data.message ?? 'Unknown streaming error' })
+        } else if (eventName === 'done') {
+          emit({ requestId, type: 'done' })
+        }
+      }
     }
-  })
-
-  mainWindow.on('ready-to-show', () => {
-    mainWindow.show()
-  })
-
-  mainWindow.webContents.setWindowOpenHandler((details) => {
-    shell.openExternal(details.url)
-    return { action: 'deny' }
-  })
-
-  // HMR for renderer base on electron-vite cli.
-  // Load the remote URL for development or the local html file for production.
-  if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
-    mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
-  } else {
-    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+  } catch (error) {
+    const text = error instanceof Error ? error.message : 'Stream interrupted'
+    emit({ requestId, type: 'error', message: text })
+    return
   }
+
+  emit({ requestId, type: 'done' })
 }
 
 function createOverlayWindow(): void {
@@ -161,6 +202,11 @@ function createOverlayWindow(): void {
 
   overlayWindow.setMinimumSize(MIN_EXPANDED_BOUNDS.width, MIN_EXPANDED_BOUNDS.height)
   overlayWindow.setMaximumSize(MAX_EXPANDED_BOUNDS.width, MAX_EXPANDED_BOUNDS.height)
+
+  overlayWindow.webContents.setWindowOpenHandler((details) => {
+    shell.openExternal(details.url)
+    return { action: 'deny' }
+  })
 
   // Keep track of manual resizes so minimize -> maximize restores the size
   // the user actually left it at, not the hardcoded default. Only applies
@@ -307,20 +353,20 @@ app.whenReady().then(() => {
     optimizer.watchWindowShortcuts(window)
   })
 
-  // IPC test
-  ipcMain.on('ping', () => console.log('pong'))
-
   // Phase 4: renderer-triggered capture (e.g. a button while the overlay is
   // in interactive mode), in addition to the global shortcut below.
   ipcMain.handle('capture:screen', () => captureScreen())
 
-  ipcMain.handle('chat:send', (_event, payload: { message: string; screenshot?: string }) =>
-    sendChatMessage(payload.message, payload.screenshot)
+  ipcMain.on(
+    'chat:send-stream',
+    (event, payload: { requestId: string; message: string; screenshot?: string }) => {
+      void streamChatMessage(event.sender, payload.requestId, payload.message, payload.screenshot)
+    }
   )
 
   ipcMain.on('overlay:toggle-minimize', () => toggleOverlayMinimize())
+  ipcMain.on('app:quit', () => app.quit())
 
-  createWindow()
   createOverlayWindow()
 
   globalShortcut.register('CommandOrControl+Shift+Space', toggleOverlayVisibility)
@@ -334,7 +380,6 @@ app.whenReady().then(() => {
     // On macOS it's common to re-create a window in the app when the
     // dock icon is clicked and there are no other windows open.
     if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow()
       createOverlayWindow()
     }
   })

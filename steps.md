@@ -188,12 +188,314 @@ text, shortcut hints, or the separate capture-exclusion demo panel.
       still-active expanded minimum size would clamp the shrink animation,
       or the dot-sized constraint would clamp the grow animation — 2026-08-09
 - [x] Typecheck + lint clean, dev app rebuilt and relaunched — 2026-08-09
-- [ ] Manual verification: drag an edge/corner of the expanded panel to
-      resize it, confirm the grab cursor shows over the titlebar/dot, and
-      confirm minimize → maximize restores the resized size (not the default)
+- [x] Manually verified by user — resize, grab cursor, and minimize/maximize
+      restoring the resized size all confirmed working — 2026-09-01
+
+## Manual verification — confirmed by user
+- [x] All pending manual checks from the chat/minimize/resize batches above
+      (chat send/reply, screenshot attach + thumbnail, dot click/drag,
+      resize + restore) — user tested the app directly and confirmed it's
+      working — 2026-09-01
+
+## Gemini integration prep — 2026-09-01
+Server-side groundwork so a `secrets.json` drop-in switches the chat server
+from echo mode to real Gemini replies, no code changes needed at handoff.
+
+- [x] `server/index.js` rewritten: loads `server/secrets.json` (gitignored)
+      for `geminiApiKey`/`geminiModel`, with `GEMINI_API_KEY`/`GEMINI_MODEL`
+      env vars as override. No key found → same echo-reply behavior as
+      before (pipeline still exercisable with zero credentials) — 2026-09-01
+- [x] With a key present, `callGemini()` POSTs to the Gemini
+      `generateContent` REST endpoint via the built-in `fetch` (Node 22, no
+      new dependency), sending the message as text and, if attached, the
+      screenshot data URL as inline multimodal image data (mime type parsed
+      off the `data:` prefix) — 2026-09-01
+- [x] 30s request timeout via `AbortController`; Gemini errors (bad key,
+      blocked prompt, non-2xx) surface as `502` with `{ "error": "..." }`
+      instead of crashing the server or hanging the overlay — 2026-09-01
+- [x] `server/secrets.example.json` added showing the expected shape
+      (`geminiApiKey`, optional `geminiModel`, defaults to
+      `gemini-2.5-flash`); `server/secrets.json` added to `.gitignore` —
+      2026-09-01
+- [x] `server/README.md` updated with the Gemini setup steps — 2026-09-01
+- [x] Verified both paths by hand: server boots and echoes correctly with no
+      key configured; separately confirmed it detects a key when
+      `GEMINI_API_KEY` is set in the environment (a stray `GEMINI_API_KEY`
+      was already present in the dev shell env — unrelated to this project,
+      flagged to the user, not committed anywhere) — 2026-09-01
+- [x] `npm run typecheck` clean (server/ is plain CommonJS, outside the
+      TS/eslint toolchain, unaffected) — 2026-09-01
+- [x] User provided real credentials — end-to-end test done — 2026-09-01
+
+## Vertex AI (service-account) auth path — 2026-09-01
+User's `secrets.json` turned out to be a GCP service-account key (Vertex AI),
+not an AI Studio API key — extended the server to support both.
+
+- [x] **Security catch before testing**: the credential was initially saved
+      to `server/secrets.example.json` (tracked, not gitignored) instead of
+      `server/secrets.json`. Caught before any commit (`git status` showed
+      it untracked, never in history) — moved the real key to
+      `server/secrets.json` (gitignored) and restored `secrets.example.json`
+      to a placeholder. Flagged to user — 2026-09-01
+- [x] `server/index.js`: added a second auth mode. If `secrets.json` has
+      `"type": "service_account"` (the raw JSON downloaded from GCP Console,
+      used as-is, no reshaping), the server does a JWT bearer token exchange
+      (`crypto.sign('RSA-SHA256', ...)` against `private_key`, POSTed to
+      `token_uri`) to get an OAuth2 access token, cached until ~60s before
+      expiry, then calls Vertex AI's `generateContent` endpoint
+      (`{location}-aiplatform.googleapis.com/.../publishers/google/models/...`)
+      with it as a Bearer token. Plain-API-key mode (`geminiApiKey`) still
+      works as an alternative if `secrets.json` has that shape instead — env
+      var `GEMINI_API_KEY` still takes priority over either — 2026-09-01
+- [x] `GEMINI_LOCATION` env var (default `us-central1`) for the Vertex
+      region; `GEMINI_MODEL` (default `gemini-2.5-flash`) works for both
+      modes — 2026-09-01
+- [x] `server/README.md` updated to document both credential shapes — 2026-09-01
+- [x] Verified end-to-end against the real service account: text-only
+      message got a real Gemini reply via Vertex; a message with an attached
+      screenshot (multimodal) also got a real reply referencing the image —
+      both confirmed working — 2026-09-01
+- [x] `npm run typecheck` clean — 2026-09-01
+
+## Chat scroll fix + markdown rendering — 2026-09-01
+User ran the app and reported: chat scrolling wasn't working, and replies
+needed markdown rendering instead of raw text.
+
+- [x] **Root cause of the scroll bug**: `.overlay-messages` (a flex column
+      with `overflow-y: auto`) had `justify-content: flex-end` — a known
+      Chromium flexbox gotcha where combining flex-end with overflow breaks
+      scrolling to reveal content above the fold. Removed it; the existing
+      auto-scroll-to-bottom effect on new messages already gives the same
+      "pinned to latest" UX without it. The empty-state placeholder still
+      centers correctly on its own (`margin: auto 0`, which wins over
+      `justify-content` on the main axis regardless) — 2026-09-01
+- [x] Since the overlay window is excluded from screen capture by design
+      (Phase 2), it can't be verified with an OS-level screenshot — used a
+      throwaway Playwright `_electron` driver script (CDP-based, reads the
+      DOM directly, unaffected by capture exclusion) to build the app,
+      launch it, send messages past the panel's height, and confirm
+      `scrollHeight > clientHeight` with `scrollTop` actually movable
+      end-to-end — confirmed fixed. Script and its `playwright-core` dev
+      dependency were scratch-only, not committed — 2026-09-01
+- [x] Added `react-markdown` + `remark-gfm` (real dependencies) and render
+      each bubble's text through them instead of a plain `<p>` — 2026-09-01
+- [x] Added `.overlay-markdown` CSS for compact rendering inside a chat
+      bubble: paragraphs, lists, links, bold/italic, blockquote, inline code
+      + code blocks, tables (GFM), headings, `<hr>` — 2026-09-01
+- [x] Caught + fixed a knock-on bug: `base.css` has a global
+      `ul { list-style: none; }` (for nav-style lists elsewhere) that was
+      silently stripping bullet markers from rendered markdown lists.
+      Added explicit `list-style: disc`/`decimal` inside
+      `.overlay-markdown` — 2026-09-01
+- [x] Verified via the same Playwright driver: sent a prompt asking for
+      bold/italic/list/inline-code markdown, confirmed real `<strong>`,
+      `<em>`, `<ul><li>`, `<code>` elements in the DOM (not literal
+      asterisks/backticks) and visible bullet markers in a CDP screenshot — 2026-09-01
+- [x] `npm run typecheck` + `npm run lint` clean; `npm run build` clean — 2026-09-01
+
+## Typing indicator — 2026-09-01
+- [x] Added a bouncing-dots bubble shown while waiting for a reply, gone once
+      it arrives. Verified via the same Playwright DOM-driving approach
+      (screen capture can't see the overlay by design, so this is the only
+      way to confirm UI state) — during-send state showed the indicator +
+      disabled send button, after-reply state showed it gone — 2026-09-01
+
+## Declined: live system-audio transcription — 2026-09-01
+User asked for STT that listens to system audio (even over Bluetooth output)
+and types the result into chat. Declined the version where it feeds live
+into the invisible/capture-excluded overlay during an active call — that's
+the "live answer-feeding" pattern `plan.md` already scoped out (deceiving
+whoever's on the other end of the call about the source of the answers,
+plus call-recording consent issues). Offered alternatives (mic dictation for
+own messages, personal post-call notes with a visible/non-hidden indicator,
+accessibility captions). User then said "this is for note taking" without
+otherwise changing the request — flagged that a visible, non-hidden,
+notes-only version would need to be structurally separate from the existing
+invisible chat overlay to actually be that, and asked for confirmation
+before building. No confirmation yet — **not built**, no code changes made
+for this. Revisit only if the user gives a concrete, structurally-different
+ask (separate visible panel, saved transcript, not wired into the live
+chat/answer loop) — 2026-09-01
+
+## Streaming chat replies — 2026-09-01
+Replies were arriving as one lump after a wait; switched to real token
+streaming end-to-end.
+
+- [x] `server/index.js`: new `POST /api/chat/stream` SSE endpoint. Added
+      `streamGeminiApiKey`/`streamGeminiVertex` (call Gemini's/Vertex's
+      `streamGenerateContent?alt=sse` instead of `generateContent`) and a
+      `consumeSse()` reader that parses Gemini's SSE frames and relays each
+      text delta out over our own SSE format (`event: delta|done|error`).
+      Echo mode (no credentials) simulates streaming by trickling the reply
+      out word-by-word, so the pipeline stays testable without them — 2026-09-01
+- [x] **Bug caught during testing**: Gemini's SSE frames are
+      `\r\n\r\n`-terminated, not `\n\n` — the initial parser split on `\n\n`
+      only, silently buffered the entire response, and emitted zero deltas
+      (only `done`). Caught via a direct curl/raw-fetch probe of Gemini's
+      endpoint showing the actual bytes; fixed by normalizing `\r\n` → `\n`
+      before splitting. (Our own server→main relay format uses plain `\n\n`
+      already, so the main-process parser didn't need this fix.) — 2026-09-01
+- [x] **UX follow-up**: even after the parser fix, short replies still
+      arrived as one or two large chunks near the end rather than smoothly —
+      Gemini 2.5's "thinking" mode reasons silently and only flushes
+      answer-text deltas once reasoning is done. Set
+      `generationConfig.thinkingConfig.thinkingBudget: 0` on streaming calls
+      only, to trade reasoning depth for responsiveness (the right call for
+      a live chat UI); confirmed short replies now arrive in multiple
+      visible chunks instead of one jump — 2026-09-01
+- [x] `src/main/index.ts`: replaced the non-streaming `sendChatMessage`/
+      `chat:send` (removed, dead once renderer switched over) with
+      `streamChatMessage()` — reads the server's SSE response body,
+      re-parses it the same way, and relays each event to the renderer via
+      `sender.send('chat:stream-event', {requestId, type, ...})`, guarded so
+      `done`/`error` only fire once per requestId — 2026-09-01
+- [x] Preload: `sendChatMessage` (invoke/await) replaced with
+      `sendChatMessageStream(requestId, message, screenshot)` (fire-and-forget
+      `send`); renderer listens on `chat:stream-event` directly via
+      `window.electron.ipcRenderer.on` (same pattern already used for
+      `overlay:minimized-changed`) — 2026-09-01
+- [x] `OverlayApp.tsx`: `handleSend` now pushes an empty `streaming: true`
+      assistant placeholder immediately, appends text as `delta` events
+      arrive (`setMessages` map, keyed by requestId = the assistant
+      message's own id), clears `streaming`/`sending` on `done`/`error`.
+      Per-bubble rendering shows the typing-dots indicator only while that
+      specific message is streaming AND still empty; once text starts
+      arriving, switches to live-growing markdown — replaces the old
+      separate typing bubble entirely — 2026-09-01
+- [x] Verified via Playwright DOM sampling (screen capture can't see the
+      overlay by design): assistant bubble's text length polled every 500ms
+      during a real Gemini reply, confirmed it grows across multiple samples
+      (0 → 0 → 87 → 399 chars) rather than jumping straight from empty to
+      full — real incremental rendering in the actual app, not simulated — 2026-09-01
+- [x] `npm run typecheck` + `npm run lint` + `npm run build` all clean — 2026-09-01
+
+## Scroll-while-streaming fix — 2026-09-01
+Streaming made an existing rough edge worse: the auto-scroll-to-bottom
+effect fired on every incoming chunk, so trying to scroll up to read a
+response while it was still streaming in got yanked back down repeatedly.
+
+- [x] Added a "pinned to bottom" ref, updated from an `onScroll` handler on
+      `.overlay-messages` (`distanceFromBottom < 60px`). The auto-scroll
+      effect now only fires `scrollIntoView` when pinned — scrolling away
+      from the bottom (including mid-stream) now leaves it alone — 2026-09-01
+- [x] Sending a new message always force-repins to bottom first
+      (`isPinnedToBottomRef.current = true` in `handleSend`), matching normal
+      chat UX — hitting send takes you to the bottom regardless of where you
+      were reading — 2026-09-01
+- [x] **Bug caught while testing this**: `scrollIntoView({ behavior: 'auto' })`
+      does not mean "instant" — per spec, `'auto'` defers to the CSS
+      `scroll-behavior` value, and empirically some scrollTop writes were
+      still getting smoothed/animated over many small steps, which showed up
+      as continued drift even while correctly *not* pinned. Switched to
+      `behavior: 'instant'` (spec-guaranteed non-animated) — 2026-09-01
+- [x] Verified with a throwaway Playwright driver using **real mouse-wheel
+      events** (`overlay.mouse.wheel()`, not a raw `scrollTop` write, which
+      turned out to trigger different browser-internal smoothing than actual
+      user input does): wheel-scrolling up mid-stream held `scrollTop` at 0
+      for 4+ seconds of continued streaming (previously drifted upward the
+      whole time); wheel-scrolling back down re-pinned and correctly tracked
+      the growing content again — 2026-09-01
+- [x] `npm run typecheck` + `npm run lint` + `npm run build` all clean — 2026-09-01
+
+## Real desktop app: tray quit + Windows installer — 2026-09-01
+User wants to run this as an actual installed app (double-click icon), not
+`npm run dev` in a terminal, and asked specifically how to fully quit it
+without losing the "closing the overlay doesn't kill the app" behavior.
+
+- [x] Removed the leftover boilerplate window entirely: `createWindow()` in
+      `src/main/index.ts` (the default electron-vite template window — logo,
+      "IPC test" ping button) is gone, along with its calls in
+      `app.whenReady()`/`app.on('activate', ...)`. Only the overlay window
+      exists now — 2026-09-01
+- [x] `src/renderer/src/App.tsx` simplified to unconditionally render
+      `OverlayApp` (the non-overlay boilerplate branch was unreachable once
+      the only window loads with `?overlay=1`). Deleted the
+      now-dead `components/Versions.tsx` and `assets/electron.svg` — 2026-09-01
+- [x] Removed `ipcMain.on('ping', ...)` (only the deleted "Send IPC" link
+      used it) — 2026-09-01
+- [x] Relocated `shell.openExternal` window-open handling from the deleted
+      mainWindow onto the overlay window, so a link clicked inside a
+      markdown reply still opens in the system browser instead of
+      navigating the overlay itself — 2026-09-01
+- [x] Added a system tray icon (`Tray` + `Menu` from `electron`, using the
+      existing `resources/icon.png`) with a single-item context menu:
+      **Quit** → `app.quit()`. This is now the one deliberate way to fully
+      exit — hiding the overlay (Ctrl/Cmd+Shift+Space) and minimizing to the
+      dot still only change visibility, never terminate the process,
+      exactly as before — 2026-09-01
+- [x] Verified via a throwaway Playwright driver: confirmed only one window
+      exists on launch (boilerplate window gone), then called `app.quit()`
+      directly (the same call the tray's Quit item makes) and confirmed the
+      window count drops to 0 **and** the OS process itself fully
+      terminates (checked via `Get-Process` afterward — nothing left
+      running) — 2026-09-01
+- [x] `npm run typecheck` + `npm run lint` + `npm run build` all clean — 2026-09-01
+- [x] Built the real installer: `npm run build:win` → typecheck, build,
+      then `electron-builder --win` → `dist/cluely-app-1.0.0-setup.exe`
+      (NSIS installer, one-click, desktop shortcut). Confirmed unsigned via
+      `Get-AuthenticodeSignature` (`NotSigned`) — matches the disclosed
+      SmartScreen-warning limitation, not a build failure — 2026-09-01
+- [x] User ran the packaged app directly (`dist/win-unpacked/cluely-app.exe`,
+      launched a few times over the session, closed via tray Quit and
+      relaunched cleanly each time) — 2026-09-01
+
+## Cross button + minimize shortcut report — 2026-09-01
+- User reported `Ctrl+Shift+M` doesn't re-expand the overlay after
+  minimizing to the dot. Not root-caused (global-shortcut registration
+  conflicts are the leading suspect, but unconfirmed) — user redirected to a
+  simpler fix before that was pinned down, so **this is still an open,
+  unconfirmed bug** if the keyboard shortcut path specifically is used
+  again — 2026-09-01
+- [x] Per "keep it simple," added a small × button to `.overlay-titlebar`
+      (next to the dot, `overlay-close-btn` in `main.css`) wired directly to
+      `window.api.toggleMinimize()` — the same call the dot's click makes,
+      bypassing the global shortcut entirely. Minimizing now has a plain,
+      obvious click target instead of relying only on the dot or the
+      possibly-broken shortcut — 2026-09-01
+- [x] `npm run typecheck` + `npm run lint` clean; rebuilt
+      `dist/win-unpacked/cluely-app.exe` via `npm run build:unpack` and
+      relaunched — 2026-09-01
+
+## Reversed: tray removed, × now quits — 2026-09-01
+User tried the × (it minimized, as built) and clarified the actual want:
+the × should be the real quit action, no tray icon at all, and the existing
+Ctrl+Shift+M / Ctrl+Shift+Space shortcuts should stay exactly as they were.
+
+- [x] Removed the tray icon entirely: `Tray`/`Menu` imports, the `tray`
+      module-level variable, and `createTray()` (and its call) all deleted
+      from `src/main/index.ts`. The `icon` import (from
+      `resources/icon.png?asset`) was only used by the tray, so it's gone
+      too — 2026-09-01
+- [x] Added a real quit path: `ipcMain.on('app:quit', () => app.quit())` in
+      main; `quitApp()` added to the preload `api` (fire-and-forget
+      `ipcRenderer.send('app:quit')`) and its `.d.ts` type — 2026-09-01
+- [x] `OverlayApp.tsx`: the × button's `onClick` now calls
+      `window.api.quitApp()` instead of `toggleMinimize()`; tooltip changed
+      from "Minimize" to "Quit". The dot's click still toggles
+      minimize/maximize, untouched — 2026-09-01
+- [x] `Ctrl+Shift+M` and `Ctrl+Shift+Space` registrations in
+      `app.whenReady()` were never touched by any of this — confirmed still
+      present, unchanged — 2026-09-01
+- [x] Verified with a throwaway Playwright driver: launched the built app,
+      clicked `.overlay-close-btn` (the × ), confirmed window count dropped
+      to 0 **and**, after clearing out an unrelated stale process from
+      earlier in the session, confirmed via `Get-Process` that no
+      `electron.exe` process remains at all after the click — the × now
+      fully terminates the app, no tray fallback needed — 2026-09-01
+- [x] `npm run typecheck` + `npm run lint` clean; rebuilt
+      `dist/win-unpacked/cluely-app.exe` via `npm run build:unpack` and
+      relaunched for the user — 2026-09-01
+- [ ] `Ctrl+Shift+M` not re-expanding after minimize is **still an open,
+      unconfirmed bug** — not investigated further, superseded by the ×
+      button being the primary interaction now, but the shortcut itself
+      hasn't been fixed or root-caused
 
 ## Next up
-Waiting on the manual verification pass above. After that: Phase 5 (capture-
-exclusion test methodology — the `getDisplayMedia()` test page) is still the
-next unstarted research phase, unless you want to keep iterating on the
-chat/UI side first.
+Gemini/Vertex wiring, chat scrolling (including while streaming), markdown
+rendering, the typing indicator, streaming replies, and a real installable
+desktop app are all live and verified. The × button is now the one true
+quit path (no tray). Phase 5 (capture-exclusion test methodology — the
+`getDisplayMedia()` test page) is the next unstarted research phase from
+`plan.md`. Phase 7 (packaging & signing) is partially done — installer
+builds and runs, just unsigned. The `Ctrl+Shift+M` re-expand bug is still
+open if it comes up again.

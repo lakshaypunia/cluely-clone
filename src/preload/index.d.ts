@@ -7,12 +7,11 @@ interface CaptureResult {
   timestamp: number
 }
 
-type ChatResult = { reply: string } | { error: string }
-
 interface Api {
   captureScreen: () => Promise<CaptureResult | null>
-  sendChatMessage: (message: string, screenshot?: string) => Promise<ChatResult>
+  sendChatMessageStream: (requestId: string, message: string, screenshot?: string) => void
   toggleMinimize: () => void
+  quitApp: () => void
 }
 
 declare global {

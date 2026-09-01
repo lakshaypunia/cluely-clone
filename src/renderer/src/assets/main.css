@@ -246,6 +246,29 @@ html.overlay-mode #root {
   background: rgba(255, 255, 255, 0.32);
 }
 
+.overlay-close-btn {
+  -webkit-app-region: no-drag;
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--ev-c-text-3);
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
+}
+
+.overlay-close-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--ev-c-text-1);
+}
+
 /* ---------- Chat ---------- */
 
 .overlay-messages {
@@ -254,7 +277,6 @@ html.overlay-mode #root {
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  justify-content: flex-end;
   gap: 10px;
   padding: 4px 14px 10px;
 }
@@ -283,10 +305,116 @@ html.overlay-mode #root {
   line-height: 1.48;
 }
 
-.overlay-bubble p {
-  margin: 0;
-  white-space: pre-wrap;
+.overlay-markdown {
   word-break: break-word;
+}
+
+.overlay-markdown > *:first-child {
+  margin-top: 0;
+}
+
+.overlay-markdown > *:last-child {
+  margin-bottom: 0;
+}
+
+.overlay-markdown p {
+  margin: 0 0 8px;
+  white-space: pre-wrap;
+}
+
+.overlay-markdown ul {
+  margin: 0 0 8px;
+  padding-left: 20px;
+  list-style: disc;
+}
+
+.overlay-markdown ol {
+  margin: 0 0 8px;
+  padding-left: 20px;
+  list-style: decimal;
+}
+
+.overlay-markdown li {
+  margin: 2px 0;
+}
+
+.overlay-markdown li > p {
+  margin: 0;
+}
+
+.overlay-markdown a {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-color: rgba(255, 255, 255, 0.4);
+}
+
+.overlay-markdown strong {
+  font-weight: 700;
+}
+
+.overlay-markdown em {
+  font-style: italic;
+}
+
+.overlay-markdown blockquote {
+  margin: 0 0 8px;
+  padding-left: 10px;
+  border-left: 2px solid rgba(255, 255, 255, 0.2);
+  opacity: 0.85;
+}
+
+.overlay-markdown code {
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 12px;
+  font-family:
+    ui-monospace,
+    SFMono-Regular,
+    SF Mono,
+    Menlo,
+    Consolas,
+    monospace;
+}
+
+.overlay-markdown pre {
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.3);
+  overflow-x: auto;
+}
+
+.overlay-markdown pre code {
+  background: none;
+  padding: 0;
+}
+
+.overlay-markdown table {
+  border-collapse: collapse;
+  margin: 0 0 8px;
+  font-size: 12px;
+}
+
+.overlay-markdown th,
+.overlay-markdown td {
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  padding: 3px 6px;
+  text-align: left;
+}
+
+.overlay-markdown hr {
+  border: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.15);
+  margin: 8px 0;
+}
+
+.overlay-markdown h1,
+.overlay-markdown h2,
+.overlay-markdown h3 {
+  margin: 0 0 6px;
+  font-size: 1em;
+  font-weight: 700;
 }
 
 .overlay-bubble-user {
@@ -302,6 +430,42 @@ html.overlay-mode #root {
   color: var(--ev-c-text-1);
   border: 1px solid rgba(255, 255, 255, 0.06);
   border-bottom-left-radius: 4px;
+}
+
+.overlay-typing-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 2px;
+}
+
+.overlay-typing-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ev-c-text-2);
+  animation: overlay-typing-bounce 1.1s ease-in-out infinite;
+}
+
+.overlay-typing-dot:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.overlay-typing-dot:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes overlay-typing-bounce {
+  0%,
+  60%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.5;
+  }
+  30% {
+    transform: translateY(-4px);
+    opacity: 1;
+  }
 }
 
 .overlay-bubble-thumb {
