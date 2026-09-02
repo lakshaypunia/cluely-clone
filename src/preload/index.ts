@@ -18,7 +18,7 @@ const api = {
   toggleMinimize: (): void => ipcRenderer.send('overlay:toggle-minimize'),
   quitApp: (): void => ipcRenderer.send('app:quit'),
   transcribeAudio: (audio: string, mimeType: string): Promise<{ text: string; error?: string }> =>
-    ipcRenderer.invoke('audio:transcribe', { audio, mimeType }),
+    ipcRenderer.invoke('audio:transcribe', { audio, mimeType })
 }
 
 // Use `contextBridge` APIs to expose Electron APIs to

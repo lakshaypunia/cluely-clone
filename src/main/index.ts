@@ -51,7 +51,8 @@ const MOVE_STEP = 40
 // always snapping back to DEFAULT_EXPANDED_BOUNDS.
 let isFullSize = false
 let preFullSizeBounds: { width: number; height: number } | null = null
-const CHAT_SERVER_URL = process.env.CLUELY_CHAT_SERVER_URL ?? 'http://localhost:4319/api/chat'
+const CHAT_SERVER_URL =
+  process.env.CLUELY_CHAT_SERVER_URL ?? 'https://cluely-server-3un1.onrender.com/api/chat'
 const CHAT_STREAM_SERVER_URL = `${CHAT_SERVER_URL}/stream`
 const TRANSCRIBE_SERVER_URL = CHAT_SERVER_URL.replace(/\/chat$/, '/transcribe')
 
@@ -431,8 +432,6 @@ app.whenReady().then(() => {
   ipcMain.handle('audio:transcribe', (_event, payload: { audio: string; mimeType: string }) =>
     transcribeAudio(payload.audio, payload.mimeType)
   )
-
-  
 
   createOverlayWindow()
 
