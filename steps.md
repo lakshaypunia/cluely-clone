@@ -664,3 +664,27 @@ that's the now-confirmed likely cause. Real speech-to-text *accuracy* for
 mic dictation still needs the user's own live test — the pipeline is
 verified to not error, but no automated test here could actually speak
 into a mic.
+
+- [x] Rebranded to Pulse Engine: `productName`/`executableName`/`appId` in
+      `electron-builder.yml`, window title, `app.setAppUserModelId`,
+      `package.json` name, and a full icon set generated from a user-
+      supplied logo (padded onto a square canvas rather than stretched,
+      since the source was non-square) — 2026-09-02
+- [x] Deployed `server/` to Render (`cluely-server-3un1.onrender.com`) as
+      its own Node web service (`server/package.json` added so Render
+      doesn't need to install the Electron/React deps from the root
+      `package.json`). App's default `CHAT_SERVER_URL` now points there
+      instead of `localhost:4319` (still overridable via
+      `CLUELY_CHAT_SERVER_URL` for local dev) — 2026-09-02
+- [x] User-message bubble color changed from green to light grey
+      (`.overlay-bubble-user` in `main.css`) — 2026-09-02
+- [x] Added a system prompt (`SYSTEM_PROMPT`/`SYSTEM_INSTRUCTION` in
+      `server/index.js`) to all four chat call functions (api-key +
+      Vertex, streaming + non-streaming) — gives the model a "Pulse
+      Engine" identity and a concise-answers instruction. Not applied to
+      the transcription calls, which already carry their own
+      single-purpose instruction. Verified locally: asking "what is your
+      name" now correctly returns "I am Pulse Engine..." — 2026-09-02
+- [x] Quit shortcut moved from `Ctrl+Shift+6` to `Ctrl+Shift+N` (frees up
+      6 in case a 7th numbered command is ever needed, and N reads more
+      clearly as "quit") — 2026-09-02

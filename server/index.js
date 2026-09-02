@@ -147,6 +147,15 @@ async function consumeSse(body, onDelta) {
   }
 }
 
+// System prompt for the chat conversation (not used for transcription,
+// which has its own single-purpose instruction below).
+const SYSTEM_PROMPT =
+  'You are Pulse Engine, a helpful AI assistant embedded in a desktop overlay app. ' +
+  'Give clear, direct, concise answers — skip unnecessary preamble and avoid repeating ' +
+  'the question back. When a screenshot is included with the message, use it as context ' +
+  'for whatever is currently on the user\'s screen.'
+const SYSTEM_INSTRUCTION = { parts: [{ text: SYSTEM_PROMPT }] }
+
 // --- API key mode (public Generative Language API) ---
 
 async function callGeminiApiKey(message, screenshotDataUrl) {
@@ -156,7 +165,10 @@ async function callGeminiApiKey(message, screenshotDataUrl) {
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ contents: [{ parts: buildParts(message, screenshotDataUrl) }] })
+      body: JSON.stringify({
+        contents: [{ parts: buildParts(message, screenshotDataUrl) }],
+        systemInstruction: SYSTEM_INSTRUCTION
+      })
     }
   )
   const body = await res.json()
@@ -182,6 +194,7 @@ async function streamGeminiApiKey(message, screenshotDataUrl, onDelta) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         contents: [{ parts: buildParts(message, screenshotDataUrl) }],
+        systemInstruction: SYSTEM_INSTRUCTION,
         generationConfig: STREAMING_GENERATION_CONFIG
       })
     },
@@ -247,7 +260,10 @@ async function callGeminiVertex(message, screenshotDataUrl) {
       Authorization: `Bearer ${accessToken}`,
       'Content-Type': 'application/json'
     },
-    body: JSON.stringify({ contents: [{ role: 'user', parts: buildParts(message, screenshotDataUrl) }] })
+    body: JSON.stringify({
+      contents: [{ role: 'user', parts: buildParts(message, screenshotDataUrl) }],
+      systemInstruction: SYSTEM_INSTRUCTION
+    })
   })
   const body = await res.json()
   if (!res.ok) {
@@ -270,6 +286,7 @@ async function streamGeminiVertex(message, screenshotDataUrl, onDelta) {
       },
       body: JSON.stringify({
         contents: [{ role: 'user', parts: buildParts(message, screenshotDataUrl) }],
+        systemInstruction: SYSTEM_INSTRUCTION,
         generationConfig: STREAMING_GENERATION_CONFIG
       })
     },

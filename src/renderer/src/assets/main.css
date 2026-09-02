@@ -419,8 +419,8 @@ html.overlay-mode #root {
 
 .overlay-bubble-user {
   align-self: flex-end;
-  background: linear-gradient(135deg, #22c55e, #16a34a);
-  color: #06210f;
+  background: #d1d5db;
+  color: #1f2937;
   border-bottom-right-radius: 4px;
 }
 

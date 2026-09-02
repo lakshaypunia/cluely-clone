@@ -452,13 +452,14 @@ app.whenReady().then(() => {
   })
 
   // Numbered commands: 1-4 nudge the overlay around the screen, 5 toggles
-  // full/original size, 6 quits the app.
+  // full/original size. Quit is Ctrl/Cmd+Shift+N (not a number, so it can't
+  // collide with a future numbered command).
   globalShortcut.register('CommandOrControl+Shift+1', () => moveOverlay(-MOVE_STEP, 0))
   globalShortcut.register('CommandOrControl+Shift+2', () => moveOverlay(MOVE_STEP, 0))
   globalShortcut.register('CommandOrControl+Shift+3', () => moveOverlay(0, -MOVE_STEP))
   globalShortcut.register('CommandOrControl+Shift+4', () => moveOverlay(0, MOVE_STEP))
   globalShortcut.register('CommandOrControl+Shift+5', toggleOverlayFullSize)
-  globalShortcut.register('CommandOrControl+Shift+6', () => app.quit())
+  globalShortcut.register('CommandOrControl+Shift+N', () => app.quit())
 
   // 7: toggle mic dictation on/off. 8: clear the composer. 9: send whatever
   // is currently typed. 0: toggle the "attach a screenshot" flag. All four
