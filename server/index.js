@@ -282,6 +282,62 @@ async function streamGeminiVertex(message, screenshotDataUrl, onDelta) {
   await consumeSse(res.body, onDelta)
 }
 
+// --- Mic dictation: audio -> text transcription ---
+
+const TRANSCRIBE_PROMPT =
+  'Transcribe the spoken audio exactly as spoken, in the language it was spoken in. ' +
+  'Output only the raw transcription text, with no preamble, labels, or quotation marks. ' +
+  'If there is no discernible speech, output nothing.'
+
+function buildAudioParts(mimeType, data) {
+  return [{ inline_data: { mime_type: mimeType, data } }, { text: TRANSCRIBE_PROMPT }]
+}
+
+// Unlike extractText, silence/no-speech is a normal outcome here (empty
+// string), not an error — only an actual block reason should throw.
+function extractTranscript(body) {
+  const text = body?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || ''
+  const blockReason = body?.promptFeedback?.blockReason
+  if (blockReason && !text) throw new Error(`Gemini blocked the prompt (${blockReason})`)
+  return text.trim()
+}
+
+async function transcribeAudioApiKey(mimeType, data) {
+  const model = secrets.geminiModel || GEMINI_MODEL
+  const res = await fetchWithTimeout(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contents: [{ parts: buildAudioParts(mimeType, data) }] })
+    }
+  )
+  const body = await res.json()
+  if (!res.ok) {
+    throw new Error(`Gemini API error: ${body?.error?.message || `HTTP ${res.status}`}`)
+  }
+  return extractTranscript(body)
+}
+
+async function transcribeAudioVertex(mimeType, data) {
+  const accessToken = await getVertexAccessToken()
+  const url = `https://${VERTEX_LOCATION}-aiplatform.googleapis.com/v1/projects/${serviceAccount.project_id}/locations/${VERTEX_LOCATION}/publishers/google/models/${GEMINI_MODEL}:generateContent`
+
+  const res = await fetchWithTimeout(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ contents: [{ role: 'user', parts: buildAudioParts(mimeType, data) }] })
+  })
+  const body = await res.json()
+  if (!res.ok) {
+    throw new Error(`Vertex AI error: ${body?.error?.message || `HTTP ${res.status}`}`)
+  }
+  return extractTranscript(body)
+}
+
 function echoReply(message, screenshotDataUrl) {
   return screenshotDataUrl
     ? `Test server received "${message}" plus a screenshot (${Math.round(screenshotDataUrl.length / 1024)}KB data URL).`
@@ -368,6 +424,43 @@ const server = http.createServer(async (req, res) => {
       sendEvent('error', { message: err.message })
     }
     res.end()
+    return
+  }
+
+  if (req.method === 'POST' && req.url === '/api/transcribe') {
+    try {
+      const body = await readJsonBody(req)
+      const audio = typeof body.audio === 'string' ? body.audio : ''
+      const mimeType = typeof body.mimeType === 'string' ? body.mimeType : ''
+      if (!audio || !mimeType) {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'Missing audio or mimeType' }))
+        return
+      }
+
+      console.log(`[transcribe] ${mimeType}, ${Math.round(audio.length / 1024)}KB`)
+
+      let text
+      if (authMode === 'api-key') {
+        text = await transcribeAudioApiKey(mimeType, audio)
+      } else if (authMode === 'vertex-service-account') {
+        text = await transcribeAudioVertex(mimeType, audio)
+      } else {
+        text = ''
+      }
+
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ text }))
+    } catch (err) {
+      if (err instanceof SyntaxError) {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'Invalid JSON body' }))
+        return
+      }
+      console.error('[transcribe] Gemini call failed:', err.message)
+      res.writeHead(502, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: err.message }))
+    }
     return
   }
 

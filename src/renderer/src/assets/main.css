@@ -478,6 +478,39 @@ html.overlay-mode #root {
   border: 1px solid rgba(0, 0, 0, 0.15);
 }
 
+.overlay-mic-status {
+  -webkit-app-region: no-drag;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px 0;
+  font-size: 11px;
+  color: var(--ev-c-text-2);
+  flex-shrink: 0;
+}
+
+.overlay-mic-status-live {
+  color: #4ade80;
+}
+
+.overlay-mic-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #ef4444;
+  animation: overlay-mic-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes overlay-mic-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+
 .overlay-composer {
   -webkit-app-region: no-drag;
   display: flex;

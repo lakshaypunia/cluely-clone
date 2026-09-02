@@ -485,17 +485,182 @@ Ctrl+Shift+M / Ctrl+Shift+Space shortcuts should stay exactly as they were.
 - [x] `npm run typecheck` + `npm run lint` clean; rebuilt
       `dist/win-unpacked/cluely-app.exe` via `npm run build:unpack` and
       relaunched for the user — 2026-09-01
-- [ ] `Ctrl+Shift+M` not re-expanding after minimize is **still an open,
-      unconfirmed bug** — not investigated further, superseded by the ×
-      button being the primary interaction now, but the shortcut itself
-      hasn't been fixed or root-caused
+- [ ] `Ctrl+Shift+M` not re-expanding after minimize was flagged as an open,
+      unconfirmed bug at the time — **see the entry below, likely
+      root-caused since**
+
+## Discarded concurrent edits (uiohook-napi, tray restored) — 2026-09-01
+Found `src/main/index.ts` + `package.json`/`package-lock.json` modified on
+disk outside this conversation — tray/`createTray()` restored, the ×-quit
+IPC handler gone, `uiohook-napi` (native global keyboard/mouse hook library)
+added as a dependency. Traced to a separate `npm run dev` the user had
+running in another terminal from ~10:13–10:53 PM, where they'd been
+experimenting themselves (possibly trying to fix the `Ctrl+Shift+M` bug via
+a lower-level input hook). User confirmed: discard it.
+
+- [x] `git checkout -- src/main/index.ts package.json package-lock.json`
+      back to commit `6d0ba5b` (the tray-removed, ×-quits version) — 2026-09-01
+- [x] `npm install` to reconcile `node_modules` (removed `uiohook-napi`) — 2026-09-01
+- [x] Confirmed clean: `npm run typecheck` + `npm run lint` pass, `grep` for
+      `Tray|createTray|uiohook` in `src/main/index.ts` returns nothing — 2026-09-01
+
+## New shortcuts: quick-send, move up/down — 2026-09-01
+Added on top of the clean, reverted base above.
+
+- [x] `Ctrl/Cmd+Shift+H` — "capture and send": registered in main, sends
+      `overlayWindow.webContents.send('shortcut:quick-send')`. Renderer
+      (`OverlayApp.tsx`) listens via a ref-based handler (avoids stale
+      closures without re-subscribing every render — `handleSendRef`,
+      updated in a `useEffect` with no deps) and calls
+      `handleSend(true)` — the `forceScreenshot` param always attaches a
+      screenshot regardless of the camera toggle, and falls back to a
+      default prompt ("What's on my screen?") if the composer is empty,
+      since the whole point is zero-typing "capture and ask" — 2026-09-01
+- [x] `Ctrl/Cmd+Shift+R` / `Ctrl/Cmd+Shift+Y` — move the overlay up/down by
+      `MOVE_STEP = 48px`, clamped to the display's work area via the
+      existing `clampToDisplay()` helper (reused, not duplicated). R = up,
+      Y = down, per the user's request order — 2026-09-01
+- [x] `npm run typecheck` + `npm run lint` clean (one real bug caught:
+      `handleSendRef.current = handleSend` written directly in the render
+      body tripped `react-hooks/refs` — "Cannot access refs during render".
+      Moved into a bare `useEffect(() => { ... })` with no dependency array
+      instead, which is the correct place for this pattern) — 2026-09-01
+- [x] **Root-caused the earlier open `Ctrl+Shift+M` bug** while verifying
+      this: used a throwaway Playwright driver to call
+      `globalShortcut.isRegistered(...)` for all five shortcuts. First run
+      (with the user's stale `npm run dev` instance from the discarded
+      experiment still alive in the background): `H`/`R`/`Y` registered
+      `true`, but **`M` and `Space` registered `false`**. Electron's
+      `globalShortcut` registrations are exclusive system-wide — the other
+      still-running instance was holding those two combos, so any other
+      instance's registration for them silently fails. Killed the stale
+      process, reran the same check: all five registered `true`. **Very
+      likely explains the original bug report** — not a code defect, but
+      two instances of the app fighting over the same global hotkeys — 2026-09-01
+- [ ] Could not fully verify the real key-press behavior (window actually
+      moving, quick-send actually firing) — global shortcuts fire via OS-level
+      `RegisterHotKey`, which Playwright can't simulate, and
+      `System.Windows.Forms.SendKeys` synthetic input (tried multiple
+      variants) did not trigger them in this environment either, for
+      reasons not root-caused. Registration is confirmed correct; the
+      actual physical-keypress behavior needs the user to try it by hand —
+      same as every other genuinely-interactive item in this log
+- [x] `npm run build:unpack` hit a persistent `EBUSY`/"resource busy" lock
+      on the asar files with no process visibly holding it (likely AV
+      real-time scanning) — worked around by launching via `npm run dev`
+      instead (no asar packaging involved) so the user isn't blocked;
+      packaged-build EBUSY issue is unresolved and may need a retry later — 2026-09-01
+
+## Fixed: R/Y meant scroll (not move window), and H double-sent — 2026-09-01
+User corrected the intent of R/Y and reported H sending two messages.
+
+- [x] **R/Y redefined**: was window-repositioning (`moveOverlay`/`MOVE_STEP`,
+      now deleted from `src/main/index.ts`), should have been scrolling the
+      chat. Registrations now push `shortcut:scroll` (`'up'`/`'down'`) to
+      the renderer, same pattern as quick-send. `OverlayApp.tsx` listens and
+      does `messagesContainerRef.current.scrollTop += ±SCROLL_STEP` (120px)
+      — this naturally fires the existing native `scroll` event too, so the
+      pinned-to-bottom tracking from the earlier scroll fix stays correct
+      with no extra wiring — 2026-09-01
+- [x] **Root cause of the H double-send**: a race, not a duplicate event
+      necessarily — `handleSend`'s re-entrancy guard checked React's
+      `sending` *state*, which updates asynchronously. If
+      `shortcut:quick-send` fired twice in close succession (global hotkeys
+      can genuinely fire more than once per physical press on key-repeat),
+      the second call could still read the stale pre-update `sending`
+      value and slip through before React flushed the first `setSending(true)`.
+      Fixed with a `sendingRef` (plain ref, updates synchronously) checked
+      at the very top of `handleSend`, reset alongside `setSending(false)`
+      in both the `done` and `error` branches of the stream-event handler — 2026-09-01
+- [x] `npm run typecheck` + `npm run lint` clean — 2026-09-01
+- [x] Verified both fixes directly: used a throwaway Playwright driver to
+      call `BrowserWindow.getAllWindows()[0].webContents.send(...)` with the
+      exact same event names/payloads the shortcut callbacks send — this
+      tests the real renderer-side logic faithfully without needing OS-level
+      key injection (which didn't work reliably here anyway, per the entry
+      above). Fired `shortcut:quick-send` twice back-to-back: result was
+      exactly one user bubble and one assistant bubble, not two — race
+      fixed. Fired `shortcut:scroll` with `'up'` then `'down'`: scrollTop
+      moved by exactly ∓120px each time — 2026-09-01
+- [x] Rebuilt and relaunched via `npm run dev` for the user (packaged
+      `build:unpack` still hitting the EBUSY lock from the prior entry) — 2026-09-01
+- [x] Added six numbered global shortcuts to `src/main/index.ts`
+      (`Ctrl+Shift+1`-`6`), pure main-process window-bounds commands with no
+      renderer involvement:
+      - `1`/`2`/`3`/`4` — nudge the overlay left/right/up/down by
+        `MOVE_STEP` (40px) via a re-added `moveOverlay(dx, dy)`, clamped to
+        the current display via the existing `clampToDisplay()` helper.
+      - `5` — `toggleOverlayFullSize()`: expands to `MAX_EXPANDED_BOUNDS`
+        (640x820, "what is max we have set"), and on a second press
+        restores whatever size the panel was at right before expanding
+        (tracked in `preFullSizeBounds`, falling back to
+        `DEFAULT_EXPANDED_BOUNDS` if somehow unset) — "original" means
+        pre-toggle size, not always the hardcoded default. No-ops while
+        minimized (`overlayMinimized` guard), same as the existing resize
+        machinery.
+      - `6` — `app.quit()`, a shortcut-driven equivalent of the × button.
+      `npm run typecheck` + `npm run lint` both clean — 2026-09-02
+- [x] Rebuilt the packaged app (`npm run build:unpack`) — the EBUSY asar
+      lock from the earlier entry didn't recur this time, and
+      `dist/win-unpacked/cluely-app.exe` now exists. Created a Desktop
+      shortcut (`Cluely.lnk`, via `WScript.Shell`) pointing at that exe as
+      "the command to open the app" — a real double-clickable launcher, not
+      a wrapper script. Verified it actually starts (`cluely-app.exe`
+      processes came up) — 2026-09-02
+
+- [x] Added mic dictation (own-mic speech-to-text into the composer, not
+      system/call audio — the earlier declined live-call-STT idea stays
+      declined) plus four more numbered shortcuts, `Ctrl+Shift+7`-`0`:
+      - **Server** (`server/index.js`): new `POST /api/transcribe` route.
+        Reuses the existing api-key/Vertex auth plumbing but with an
+        audio `inline_data` part + a "transcribe verbatim" prompt
+        (`buildAudioParts`/`transcribeAudioApiKey`/`transcribeAudioVertex`).
+        `extractTranscript` (unlike `extractText`) treats empty output as a
+        normal "no speech" result, not an error.
+      - **Main** (`src/main/index.ts`): `transcribeAudio()` does one
+        non-streaming round trip to `/api/transcribe`, exposed via
+        `ipcMain.handle('audio:transcribe', ...)`. New shortcuts: `7`
+        toggles mic recording (`shortcut:mic-toggle`), `8` clears the
+        composer (`shortcut:clear-input`), `9` sends whatever's typed
+        (`shortcut:send`, same as pressing Enter — no forced screenshot,
+        unlike `Ctrl+Shift+H`), `0` toggles the attach-screenshot flag
+        (`shortcut:toggle-screenshot`).
+      - **Renderer** (`OverlayApp.tsx`): mic toggle uses `MediaRecorder` +
+        `getUserMedia({audio:true})`, encodes the finished clip to base64
+        via `blobToBase64`, and calls `window.api.transcribeAudio`; the
+        result is appended into the composer. `isRecordingRef` (not React
+        state) gates start/stop so a fast double-press of `7` can't race.
+        A visible "Listening…" indicator with a pulsing dot shows above
+        the composer while recording (and mic errors show there too) —
+        kept visible per the earlier constraint that any mic-to-text
+        feature must be an obvious, separate, own-voice input method, not
+        folded into the invisible overlay.
+      - **Verified for real** (not just typecheck): rebuilt the packaged
+        app and drove it with a throwaway Playwright CDP script —
+        confirmed `getUserMedia` auto-grants (no permission prompt blocks
+        it), 4 real audio-input devices are visible, `MediaRecorder`
+        picks `audio/webm;codecs=opus`, and recorded a real ~1.2s mic
+        clip end-to-end through `window.api.transcribeAudio` → server →
+        Gemini with no errors (empty transcript, as expected with no
+        actual speech spoken during the automated test — could not verify
+        transcription *accuracy* this way, only that the pipeline
+        doesn't error). Also round-tripped a synthetic silent WAV
+        directly against `/api/transcribe` beforehand as a first sanity
+        check. `npm run typecheck` + `npm run lint` clean — 2026-09-02
+- [x] Rebuilt the packaged app again after these changes so the Desktop /
+      project-folder shortcuts pick up the new code — 2026-09-02
 
 ## Next up
-Gemini/Vertex wiring, chat scrolling (including while streaming), markdown
-rendering, the typing indicator, streaming replies, and a real installable
-desktop app are all live and verified. The × button is now the one true
-quit path (no tray). Phase 5 (capture-exclusion test methodology — the
-`getDisplayMedia()` test page) is the next unstarted research phase from
-`plan.md`. Phase 7 (packaging & signing) is partially done — installer
-builds and runs, just unsigned. The `Ctrl+Shift+M` re-expand bug is still
-open if it comes up again.
+Gemini/Vertex wiring, chat scrolling (including while streaming and via
+Ctrl+Shift+R/Y), markdown rendering, the typing indicator, streaming
+replies, a real installable desktop app, mic dictation, and the numbered
+shortcut set (1-0, all documented above) are all in. Phase 5
+(capture-exclusion test methodology — the `getDisplayMedia()` test page) is
+the next unstarted research phase from `plan.md`. Phase 7 (packaging &
+signing) is partially done — installer builds and runs (when not hit by
+the EBUSY lock, still unresolved), just unsigned. If the `Ctrl+Shift+M`
+bug resurfaces, check for a second running instance of the app first —
+that's the now-confirmed likely cause. Real speech-to-text *accuracy* for
+mic dictation still needs the user's own live test — the pipeline is
+verified to not error, but no automated test here could actually speak
+into a mic.

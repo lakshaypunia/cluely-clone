@@ -44,8 +44,16 @@ const DOT_SIZE = 18
 // minimizing and then maximizing again restores that size instead of
 // snapping back to the default.
 let expandedBounds = { ...DEFAULT_EXPANDED_BOUNDS }
+
+const MOVE_STEP = 40
+// Ctrl/Cmd+Shift+5 toggles between MAX_EXPANDED_BOUNDS ("full") and whatever
+// size the panel was at right before that toggle ("original"), rather than
+// always snapping back to DEFAULT_EXPANDED_BOUNDS.
+let isFullSize = false
+let preFullSizeBounds: { width: number; height: number } | null = null
 const CHAT_SERVER_URL = process.env.CLUELY_CHAT_SERVER_URL ?? 'http://localhost:4319/api/chat'
 const CHAT_STREAM_SERVER_URL = `${CHAT_SERVER_URL}/stream`
+const TRANSCRIBE_SERVER_URL = CHAT_SERVER_URL.replace(/\/chat$/, '/transcribe')
 
 async function captureScreen(): Promise<CaptureResult | null> {
   const display = screen.getPrimaryDisplay()
@@ -179,6 +187,31 @@ async function streamChatMessage(
   emit({ requestId, type: 'done' })
 }
 
+// Mic dictation: the renderer records audio locally and hands it here as a
+// base64 blob; this does a single non-streaming round trip to the server's
+// transcription endpoint and returns the text (or an error string) to the
+// caller via the ipcMain.handle return value.
+async function transcribeAudio(
+  audio: string,
+  mimeType: string
+): Promise<{ text: string; error?: string }> {
+  try {
+    const response = await fetch(TRANSCRIBE_SERVER_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ audio, mimeType })
+    })
+    const body = await response.json()
+    if (!response.ok) {
+      throw new Error(body?.error || `Server responded ${response.status}`)
+    }
+    return { text: typeof body.text === 'string' ? body.text : '' }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Transcription failed'
+    return { text: '', error: message }
+  }
+}
+
 function createOverlayWindow(): void {
   overlayWindow = new BrowserWindow({
     width: expandedBounds.width,
@@ -306,6 +339,35 @@ function clampToDisplay(
   }
 }
 
+function moveOverlay(dx: number, dy: number): void {
+  if (!overlayWindow) return
+  const current = overlayWindow.getBounds()
+  const anchor = clampToDisplay(
+    { x: current.x + dx, y: current.y + dy },
+    current.width,
+    current.height
+  )
+  overlayWindow.setBounds({ ...anchor, width: current.width, height: current.height })
+}
+
+function toggleOverlayFullSize(): void {
+  if (!overlayWindow || overlayMinimized) return
+  const current = overlayWindow.getBounds()
+
+  if (!isFullSize) {
+    preFullSizeBounds = { width: current.width, height: current.height }
+    isFullSize = true
+    const anchor = clampToDisplay(current, MAX_EXPANDED_BOUNDS.width, MAX_EXPANDED_BOUNDS.height)
+    animateWindowBounds(overlayWindow, { ...anchor, ...MAX_EXPANDED_BOUNDS })
+  } else {
+    isFullSize = false
+    const restore = preFullSizeBounds ?? DEFAULT_EXPANDED_BOUNDS
+    preFullSizeBounds = null
+    const anchor = clampToDisplay(current, restore.width, restore.height)
+    animateWindowBounds(overlayWindow, { ...anchor, ...restore })
+  }
+}
+
 function toggleOverlayMinimize(): void {
   if (!overlayWindow) return
   overlayMinimized = !overlayMinimized
@@ -366,6 +428,11 @@ app.whenReady().then(() => {
 
   ipcMain.on('overlay:toggle-minimize', () => toggleOverlayMinimize())
   ipcMain.on('app:quit', () => app.quit())
+  ipcMain.handle('audio:transcribe', (_event, payload: { audio: string; mimeType: string }) =>
+    transcribeAudio(payload.audio, payload.mimeType)
+  )
+
+  
 
   createOverlayWindow()
 
@@ -375,6 +442,40 @@ app.whenReady().then(() => {
     void triggerCaptureFromShortcut()
   })
   globalShortcut.register('CommandOrControl+Shift+M', toggleOverlayMinimize)
+  globalShortcut.register('CommandOrControl+Shift+H', () => {
+    overlayWindow?.webContents.send('shortcut:quick-send')
+  })
+  globalShortcut.register('CommandOrControl+Shift+R', () => {
+    overlayWindow?.webContents.send('shortcut:scroll', 'up')
+  })
+  globalShortcut.register('CommandOrControl+Shift+Y', () => {
+    overlayWindow?.webContents.send('shortcut:scroll', 'down')
+  })
+
+  // Numbered commands: 1-4 nudge the overlay around the screen, 5 toggles
+  // full/original size, 6 quits the app.
+  globalShortcut.register('CommandOrControl+Shift+1', () => moveOverlay(-MOVE_STEP, 0))
+  globalShortcut.register('CommandOrControl+Shift+2', () => moveOverlay(MOVE_STEP, 0))
+  globalShortcut.register('CommandOrControl+Shift+3', () => moveOverlay(0, -MOVE_STEP))
+  globalShortcut.register('CommandOrControl+Shift+4', () => moveOverlay(0, MOVE_STEP))
+  globalShortcut.register('CommandOrControl+Shift+5', toggleOverlayFullSize)
+  globalShortcut.register('CommandOrControl+Shift+6', () => app.quit())
+
+  // 7: toggle mic dictation on/off. 8: clear the composer. 9: send whatever
+  // is currently typed. 0: toggle the "attach a screenshot" flag. All four
+  // are pushed to the renderer, which owns the actual composer/mic state.
+  globalShortcut.register('CommandOrControl+Shift+7', () => {
+    overlayWindow?.webContents.send('shortcut:mic-toggle')
+  })
+  globalShortcut.register('CommandOrControl+Shift+8', () => {
+    overlayWindow?.webContents.send('shortcut:clear-input')
+  })
+  globalShortcut.register('CommandOrControl+Shift+9', () => {
+    overlayWindow?.webContents.send('shortcut:send')
+  })
+  globalShortcut.register('CommandOrControl+Shift+0', () => {
+    overlayWindow?.webContents.send('shortcut:toggle-screenshot')
+  })
 
   app.on('activate', function () {
     // On macOS it's common to re-create a window in the app when the

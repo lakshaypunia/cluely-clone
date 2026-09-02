@@ -12,6 +12,7 @@ interface Api {
   sendChatMessageStream: (requestId: string, message: string, screenshot?: string) => void
   toggleMinimize: () => void
   quitApp: () => void
+  transcribeAudio: (audio: string, mimeType: string) => Promise<{ text: string; error?: string }>
 }
 
 declare global {

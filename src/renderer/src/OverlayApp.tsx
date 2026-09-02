@@ -22,6 +22,22 @@ function nextMessageId(): string {
   return `msg-${Date.now()}-${messageIdCounter}`
 }
 
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onloadend = () => resolve(((reader.result as string) ?? '').split(',')[1] ?? '')
+    reader.onerror = () => reject(reader.error ?? new Error('Failed to read recording'))
+    reader.readAsDataURL(blob)
+  })
+}
+
+const MIC_MIME_CANDIDATES = [
+  'audio/ogg;codecs=opus',
+  'audio/webm;codecs=opus',
+  'audio/webm',
+  'audio/wav'
+]
+
 function CameraIcon(): React.JSX.Element {
   return (
     <svg
@@ -44,6 +60,25 @@ function SendIcon(): React.JSX.Element {
   return (
     <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
       <path d="M2 21l21-9L2 3v7l15 2-15 2z" />
+    </svg>
+  )
+}
+
+function MicIcon(): React.JSX.Element {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+      <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+      <line x1="12" y1="19" x2="12" y2="23" />
     </svg>
   )
 }
@@ -71,6 +106,19 @@ function OverlayApp(): React.JSX.Element {
   const [input, setInput] = useState('')
   const [attachScreenshot, setAttachScreenshot] = useState(false)
   const [sending, setSending] = useState(false)
+  const sendingRef = useRef(false)
+
+  // Mic dictation (Ctrl/Cmd+Shift+7): records the user's own mic locally,
+  // then sends the finished clip to the server for a one-shot transcription
+  // once recording stops — not a live/continuous stream. `isRecordingRef`
+  // (not the `micRecording` state) is what the toggle logic reads, so a
+  // rapid second shortcut press can't race a not-yet-flushed state update.
+  const [micRecording, setMicRecording] = useState(false)
+  const [micStatus, setMicStatus] = useState<string | null>(null)
+  const isRecordingRef = useRef(false)
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
+  const micStreamRef = useRef<MediaStream | null>(null)
+  const audioChunksRef = useRef<Blob[]>([])
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const messagesContainerRef = useRef<HTMLDivElement>(null)
@@ -95,6 +143,145 @@ function OverlayApp(): React.JSX.Element {
     }
   }, [])
 
+  // Ctrl/Cmd+Shift+H is a main-process global shortcut, so it arrives here
+  // as a push event rather than a call the renderer initiates. Routed
+  // through a ref (updated on every render below, right after handleSend is
+  // defined) so this one-time subscription always calls the latest
+  // handleSend closure instead of a stale one.
+  const handleSendRef = useRef<(forceScreenshot?: boolean) => Promise<void>>(async () => {})
+  useEffect(() => {
+    const quickSendHandler = (): void => {
+      void handleSendRef.current(true)
+    }
+    window.electron.ipcRenderer.on('shortcut:quick-send', quickSendHandler)
+    return () => {
+      window.electron.ipcRenderer.removeListener('shortcut:quick-send', quickSendHandler)
+    }
+  }, [])
+
+  // Ctrl/Cmd+Shift+R / +Y — scroll the message list up/down, same global-
+  // shortcut push pattern as quick-send above.
+  const SCROLL_STEP = 120
+  useEffect(() => {
+    const scrollHandler = (_event: unknown, direction: 'up' | 'down'): void => {
+      const el = messagesContainerRef.current
+      if (!el) return
+      el.scrollTop += direction === 'up' ? -SCROLL_STEP : SCROLL_STEP
+    }
+    window.electron.ipcRenderer.on('shortcut:scroll', scrollHandler)
+    return () => {
+      window.electron.ipcRenderer.removeListener('shortcut:scroll', scrollHandler)
+    }
+  }, [])
+
+  const handleRecordingStop = async (mimeType: string): Promise<void> => {
+    const chunks = audioChunksRef.current
+    audioChunksRef.current = []
+    micStreamRef.current?.getTracks().forEach((track) => track.stop())
+    micStreamRef.current = null
+    mediaRecorderRef.current = null
+    isRecordingRef.current = false
+    setMicRecording(false)
+
+    if (chunks.length === 0) return
+
+    setMicStatus('Transcribing…')
+    try {
+      const blob = new Blob(chunks, { type: mimeType })
+      const base64 = await blobToBase64(blob)
+      const result = await window.api.transcribeAudio(base64, mimeType.split(';')[0])
+      if (result.error) {
+        setMicStatus(`Mic error: ${result.error}`)
+      } else {
+        setMicStatus(null)
+        if (result.text) {
+          setInput((prev) => (prev ? `${prev} ${result.text}` : result.text))
+        }
+      }
+    } catch (error) {
+      setMicStatus(error instanceof Error ? error.message : 'Transcription failed')
+    }
+  }
+
+  const startMicRecording = async (): Promise<void> => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const mimeType = MIC_MIME_CANDIDATES.find((type) => MediaRecorder.isTypeSupported(type)) ?? ''
+      const recorder = mimeType
+        ? new MediaRecorder(stream, { mimeType })
+        : new MediaRecorder(stream)
+      audioChunksRef.current = []
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) audioChunksRef.current.push(event.data)
+      }
+      recorder.onstop = () => {
+        void handleRecordingStop(recorder.mimeType || mimeType || 'audio/webm')
+      }
+      mediaRecorderRef.current = recorder
+      micStreamRef.current = stream
+      recorder.start()
+      isRecordingRef.current = true
+      setMicRecording(true)
+      setMicStatus(null)
+    } catch (error) {
+      setMicStatus(error instanceof Error ? error.message : 'Microphone access failed')
+    }
+  }
+
+  // Toggle, not push-to-talk: first press starts recording (shown live via
+  // the "Listening…" indicator in the composer), second press stops it and
+  // kicks off transcription.
+  const toggleMicDictation = (): void => {
+    if (isRecordingRef.current) {
+      mediaRecorderRef.current?.stop()
+    } else {
+      void startMicRecording()
+    }
+  }
+  const toggleMicDictationRef = useRef<() => void>(() => {})
+  useEffect(() => {
+    toggleMicDictationRef.current = toggleMicDictation
+  })
+
+  // Ctrl/Cmd+Shift+7/8/9/0 — mic toggle, clear composer, send, toggle the
+  // screenshot-attach flag. Same global-shortcut push pattern as above.
+  useEffect(() => {
+    const micToggleHandler = (): void => toggleMicDictationRef.current()
+    window.electron.ipcRenderer.on('shortcut:mic-toggle', micToggleHandler)
+    return () => {
+      window.electron.ipcRenderer.removeListener('shortcut:mic-toggle', micToggleHandler)
+    }
+  }, [])
+
+  useEffect(() => {
+    const clearInputHandler = (): void => setInput('')
+    window.electron.ipcRenderer.on('shortcut:clear-input', clearInputHandler)
+    return () => {
+      window.electron.ipcRenderer.removeListener('shortcut:clear-input', clearInputHandler)
+    }
+  }, [])
+
+  useEffect(() => {
+    const sendHandler = (): void => {
+      void handleSendRef.current()
+    }
+    window.electron.ipcRenderer.on('shortcut:send', sendHandler)
+    return () => {
+      window.electron.ipcRenderer.removeListener('shortcut:send', sendHandler)
+    }
+  }, [])
+
+  useEffect(() => {
+    const toggleScreenshotHandler = (): void => setAttachScreenshot((value) => !value)
+    window.electron.ipcRenderer.on('shortcut:toggle-screenshot', toggleScreenshotHandler)
+    return () => {
+      window.electron.ipcRenderer.removeListener(
+        'shortcut:toggle-screenshot',
+        toggleScreenshotHandler
+      )
+    }
+  }, [])
+
   useEffect(() => {
     if (isPinnedToBottomRef.current) {
       messagesEndRef.current?.scrollIntoView({ behavior: 'instant' })
@@ -111,6 +298,7 @@ function OverlayApp(): React.JSX.Element {
         setMessages((prev) =>
           prev.map((m) => (m.id === data.requestId ? { ...m, streaming: false } : m))
         )
+        sendingRef.current = false
         setSending(false)
       } else if (data.type === 'error') {
         setMessages((prev) =>
@@ -124,6 +312,7 @@ function OverlayApp(): React.JSX.Element {
               : m
           )
         )
+        sendingRef.current = false
         setSending(false)
       }
     }
@@ -155,9 +344,19 @@ function OverlayApp(): React.JSX.Element {
     }
   }
 
-  const handleSend = async (): Promise<void> => {
-    const text = input.trim()
-    if (!text || sending) return
+  // forceScreenshot is set by the Ctrl/Cmd+Shift+H "quick send" shortcut:
+  // always attaches a screenshot regardless of the camera toggle, and falls
+  // back to a default prompt if the composer is empty, since the point of
+  // that shortcut is "capture and ask" with no typing required.
+  const handleSend = async (forceScreenshot = false): Promise<void> => {
+    const text = input.trim() || (forceScreenshot ? "What's on my screen?" : '')
+    // `sendingRef` (not the `sending` state) guards re-entrancy: React state
+    // updates are async, so a second call arriving in the same tick — e.g.
+    // a global hotkey firing twice for one keypress — could still see the
+    // stale `sending === false` from before `setSending(true)` flushes. The
+    // ref updates synchronously, so it actually blocks the second call.
+    if (!text || sendingRef.current) return
+    sendingRef.current = true
 
     setInput('')
     setSending(true)
@@ -168,9 +367,10 @@ function OverlayApp(): React.JSX.Element {
     // Capture client-side first so the thumbnail shown in the bubble is
     // exactly the image that gets sent to the server, not a second,
     // separate capture.
-    const screenshotDataUrl = attachScreenshot
-      ? ((await window.api.captureScreen())?.dataUrl ?? undefined)
-      : undefined
+    const screenshotDataUrl =
+      attachScreenshot || forceScreenshot
+        ? ((await window.api.captureScreen())?.dataUrl ?? undefined)
+        : undefined
 
     const userMessage: ChatMessage = {
       id: nextMessageId(),
@@ -193,6 +393,9 @@ function OverlayApp(): React.JSX.Element {
     // handled by the listener above, keyed on assistantId as the requestId.
     window.api.sendChatMessageStream(assistantId, text, screenshotDataUrl)
   }
+  useEffect(() => {
+    handleSendRef.current = handleSend
+  })
 
   const handleComposerKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>): void => {
     if (event.key === 'Enter' && !event.shiftKey) {
@@ -251,6 +454,13 @@ function OverlayApp(): React.JSX.Element {
         <div ref={messagesEndRef} />
       </div>
 
+      {(micRecording || micStatus) && (
+        <div className={`overlay-mic-status${micRecording ? ' overlay-mic-status-live' : ''}`}>
+          {micRecording && <span className="overlay-mic-dot" />}
+          {micRecording ? 'Listening…' : micStatus}
+        </div>
+      )}
+
       <div className="overlay-composer">
         <textarea
           value={input}
@@ -261,6 +471,13 @@ function OverlayApp(): React.JSX.Element {
         />
         <div className="overlay-composer-actions">
           <button
+            className={`overlay-icon-btn${micRecording ? ' overlay-icon-btn-active' : ''}`}
+            onClick={() => toggleMicDictationRef.current()}
+            title="Dictate a message with your mic"
+          >
+            <MicIcon />
+          </button>
+          <button
             className={`overlay-icon-btn${attachScreenshot ? ' overlay-icon-btn-active' : ''}`}
             onClick={() => setAttachScreenshot((value) => !value)}
             title="Attach a screenshot with this message"
@@ -269,7 +486,7 @@ function OverlayApp(): React.JSX.Element {
           </button>
           <button
             className="overlay-send-btn"
-            onClick={handleSend}
+            onClick={() => handleSend()}
             disabled={sending || !input.trim()}
             title="Send"
           >
