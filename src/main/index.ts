@@ -15,7 +15,7 @@ let overlayWindow: BrowserWindow | null = null
 // Interactive by default so the chat is usable immediately without needing
 // Ctrl/Cmd+Shift+I first; that shortcut still toggles it into click-through
 // afterwards for whenever it needs to stay out of the way.
-let overlayInteractive = true
+let overlayInteractive = false
 let overlayMinimized = false
 
 interface CaptureResult {
