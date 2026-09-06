@@ -76,15 +76,25 @@ function parseScreenshot(dataUrl) {
   return { mimeType: match[1], data: match[2] }
 }
 
-function buildParts(message, screenshotDataUrl) {
+function buildParts(message, screenshots) {
   const parts = [{ text: message || '' }]
-  if (screenshotDataUrl) {
+  for (const screenshotDataUrl of screenshots || []) {
     const image = parseScreenshot(screenshotDataUrl)
     if (image) {
       parts.push({ inline_data: { mime_type: image.mimeType, data: image.data } })
     }
   }
   return parts
+}
+
+// Accepts either the current `screenshots: string[]` shape or the older
+// single `screenshot: string` shape, so a client sending either still works.
+function normalizeScreenshots(body) {
+  if (Array.isArray(body.screenshots)) {
+    return body.screenshots.filter((s) => typeof s === 'string')
+  }
+  if (typeof body.screenshot === 'string') return [body.screenshot]
+  return []
 }
 
 function extractText(body) {
@@ -150,15 +160,23 @@ async function consumeSse(body, onDelta) {
 // System prompt for the chat conversation (not used for transcription,
 // which has its own single-purpose instruction below).
 const SYSTEM_PROMPT =
-  'You are Pulse Engine, a helpful AI assistant embedded in a desktop overlay app. ' +
-  'Give clear, direct, concise answers — skip unnecessary preamble and avoid repeating ' +
-  'the question back. When a screenshot is included with the message, use it as context ' +
-  'for whatever is currently on the user\'s screen.'
+'You are an expert real-time technical & behavioral interview assistant. ' +
+'The user is live in an interview. Provide answers formulated for direct verbal delivery: ' +
+'1. Open immediately with the core answer or thesis in the very first sentence (no greetings, no "Sure!", no restating the question). ' +
+'2. For technical questions: state the definition/core approach first, follow with 2-3 concise bullet points covering key details, time/space complexity, or trade-offs. ' +
+'3. For behavioral questions: structure directly using the STAR framework (Situation, Task, Action, Result) in under 4 bullet points. ' +
+'4. Keep answers brief, natural to read aloud, and strictly under 150 words. ' +
+'5. If code is requested, provide only the optimal snippet with 1-2 lines explaining edge cases.'
 const SYSTEM_INSTRUCTION = { parts: [{ text: SYSTEM_PROMPT }] }
 
 // --- API key mode (public Generative Language API) ---
 
-async function callGeminiApiKey(message, screenshotDataUrl) {
+const FAST_GENERATION_CONFIG = {
+  temperature: 0.3,
+  maxOutputTokens: 350,
+  thinkingConfig: { thinkingBudget: 0 }
+}
+async function callGeminiApiKey(message, screenshots) {
   const model = secrets.geminiModel || GEMINI_MODEL
   const res = await fetchWithTimeout(
     `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
@@ -166,8 +184,9 @@ async function callGeminiApiKey(message, screenshotDataUrl) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        contents: [{ parts: buildParts(message, screenshotDataUrl) }],
-        systemInstruction: SYSTEM_INSTRUCTION
+        contents: [{ parts: buildParts(message, screenshots) }],
+        systemInstruction: SYSTEM_INSTRUCTION,
+        generationConfig: FAST_GENERATION_CONFIG
       })
     }
   )
@@ -185,7 +204,7 @@ async function callGeminiApiKey(message, screenshotDataUrl) {
 // the right tradeoff for a live chat assistant.
 const STREAMING_GENERATION_CONFIG = { thinkingConfig: { thinkingBudget: 0 } }
 
-async function streamGeminiApiKey(message, screenshotDataUrl, onDelta) {
+async function streamGeminiApiKey(message, screenshots, onDelta) {
   const model = secrets.geminiModel || GEMINI_MODEL
   const res = await fetchWithTimeout(
     `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${apiKey}`,
@@ -193,9 +212,10 @@ async function streamGeminiApiKey(message, screenshotDataUrl, onDelta) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        contents: [{ parts: buildParts(message, screenshotDataUrl) }],
+        contents: [{ parts: buildParts(message, screenshots) }],
         systemInstruction: SYSTEM_INSTRUCTION,
-        generationConfig: STREAMING_GENERATION_CONFIG
+        generationConfig: STREAMING_GENERATION_CONFIG,
+        generationConfig: FAST_GENERATION_CONFIG
       })
     },
     STREAM_TIMEOUT_MS
@@ -250,7 +270,7 @@ async function getVertexAccessToken() {
   return cachedToken.accessToken
 }
 
-async function callGeminiVertex(message, screenshotDataUrl) {
+async function callGeminiVertex(message, screenshots) {
   const accessToken = await getVertexAccessToken()
   const url = `https://${VERTEX_LOCATION}-aiplatform.googleapis.com/v1/projects/${serviceAccount.project_id}/locations/${VERTEX_LOCATION}/publishers/google/models/${GEMINI_MODEL}:generateContent`
 
@@ -261,8 +281,9 @@ async function callGeminiVertex(message, screenshotDataUrl) {
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
-      contents: [{ role: 'user', parts: buildParts(message, screenshotDataUrl) }],
-      systemInstruction: SYSTEM_INSTRUCTION
+      contents: [{ role: 'user', parts: buildParts(message, screenshots) }],
+      systemInstruction: SYSTEM_INSTRUCTION,
+      generationConfig: FAST_GENERATION_CONFIG
     })
   })
   const body = await res.json()
@@ -272,7 +293,7 @@ async function callGeminiVertex(message, screenshotDataUrl) {
   return extractText(body)
 }
 
-async function streamGeminiVertex(message, screenshotDataUrl, onDelta) {
+async function streamGeminiVertex(message, screenshots, onDelta) {
   const accessToken = await getVertexAccessToken()
   const url = `https://${VERTEX_LOCATION}-aiplatform.googleapis.com/v1/projects/${serviceAccount.project_id}/locations/${VERTEX_LOCATION}/publishers/google/models/${GEMINI_MODEL}:streamGenerateContent?alt=sse`
 
@@ -285,9 +306,10 @@ async function streamGeminiVertex(message, screenshotDataUrl, onDelta) {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        contents: [{ role: 'user', parts: buildParts(message, screenshotDataUrl) }],
+        contents: [{ role: 'user', parts: buildParts(message, screenshots) }],
         systemInstruction: SYSTEM_INSTRUCTION,
-        generationConfig: STREAMING_GENERATION_CONFIG
+        generationConfig: STREAMING_GENERATION_CONFIG,
+        generationConfig: FAST_GENERATION_CONFIG
       })
     },
     STREAM_TIMEOUT_MS
@@ -355,9 +377,10 @@ async function transcribeAudioVertex(mimeType, data) {
   return extractTranscript(body)
 }
 
-function echoReply(message, screenshotDataUrl) {
-  return screenshotDataUrl
-    ? `Test server received "${message}" plus a screenshot (${Math.round(screenshotDataUrl.length / 1024)}KB data URL).`
+function echoReply(message, screenshots) {
+  const count = screenshots?.length || 0
+  return count
+    ? `Test server received "${message}" plus ${count} screenshot${count > 1 ? 's' : ''}.`
     : `Test server received "${message}".`
 }
 
@@ -366,19 +389,19 @@ const server = http.createServer(async (req, res) => {
     try {
       const body = await readJsonBody(req)
       const message = typeof body.message === 'string' ? body.message : ''
-      const screenshot = typeof body.screenshot === 'string' ? body.screenshot : null
+      const screenshots = normalizeScreenshots(body)
 
       console.log(
-        `[chat] "${message}"${screenshot ? ` + screenshot (${Math.round(screenshot.length / 1024)}KB)` : ''}`
+        `[chat] "${message}"${screenshots.length ? ` + ${screenshots.length} screenshot(s)` : ''}`
       )
 
       let reply
       if (authMode === 'api-key') {
-        reply = await callGeminiApiKey(message, screenshot)
+        reply = await callGeminiApiKey(message, screenshots)
       } else if (authMode === 'vertex-service-account') {
-        reply = await callGeminiVertex(message, screenshot)
+        reply = await callGeminiVertex(message, screenshots)
       } else {
-        reply = echoReply(message, screenshot)
+        reply = echoReply(message, screenshots)
       }
 
       res.writeHead(200, { 'Content-Type': 'application/json' })
@@ -406,10 +429,10 @@ const server = http.createServer(async (req, res) => {
       return
     }
     const message = typeof body.message === 'string' ? body.message : ''
-    const screenshot = typeof body.screenshot === 'string' ? body.screenshot : null
+    const screenshots = normalizeScreenshots(body)
 
     console.log(
-      `[chat] (stream) "${message}"${screenshot ? ` + screenshot (${Math.round(screenshot.length / 1024)}KB)` : ''}`
+      `[chat] (stream) "${message}"${screenshots.length ? ` + ${screenshots.length} screenshot(s)` : ''}`
     )
 
     res.writeHead(200, {
@@ -423,13 +446,13 @@ const server = http.createServer(async (req, res) => {
 
     try {
       if (authMode === 'api-key') {
-        await streamGeminiApiKey(message, screenshot, (text) => sendEvent('delta', { text }))
+        await streamGeminiApiKey(message, screenshots, (text) => sendEvent('delta', { text }))
       } else if (authMode === 'vertex-service-account') {
-        await streamGeminiVertex(message, screenshot, (text) => sendEvent('delta', { text }))
+        await streamGeminiVertex(message, screenshots, (text) => sendEvent('delta', { text }))
       } else {
         // No credentials: simulate streaming by trickling the echo reply out
         // word by word, so the pipeline is still exercisable without them.
-        const words = echoReply(message, screenshot).split(' ')
+        const words = echoReply(message, screenshots).split(' ')
         for (let i = 0; i < words.length; i++) {
           sendEvent('delta', { text: i < words.length - 1 ? `${words[i]} ` : words[i] })
           await new Promise((r) => setTimeout(r, 35))

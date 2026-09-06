@@ -6,7 +6,7 @@ interface ChatMessage {
   id: string
   role: 'user' | 'assistant'
   text: string
-  screenshotDataUrl?: string
+  screenshotDataUrls?: string[]
   timestamp: number
   streaming?: boolean
 }
@@ -104,7 +104,9 @@ function OverlayApp(): React.JSX.Element {
 
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
-  const [attachScreenshot, setAttachScreenshot] = useState(false)
+  // Screenshots queued up via Ctrl/Cmd+Shift+S (or the camera button) before
+  // sending — lets you capture several and send them together in one message.
+  const [pendingScreenshots, setPendingScreenshots] = useState<string[]>([])
   const [sending, setSending] = useState(false)
   const sendingRef = useRef(false)
 
@@ -271,14 +273,32 @@ function OverlayApp(): React.JSX.Element {
     }
   }, [])
 
+  // Ctrl/Cmd+Shift+0 clears the queued screenshots (in case one was captured
+  // by mistake), and Ctrl/Cmd+Shift+S captures one and adds it to the queue.
   useEffect(() => {
-    const toggleScreenshotHandler = (): void => setAttachScreenshot((value) => !value)
-    window.electron.ipcRenderer.on('shortcut:toggle-screenshot', toggleScreenshotHandler)
+    const clearScreenshotsHandler = (): void => setPendingScreenshots([])
+    window.electron.ipcRenderer.on('shortcut:clear-screenshots', clearScreenshotsHandler)
     return () => {
       window.electron.ipcRenderer.removeListener(
-        'shortcut:toggle-screenshot',
-        toggleScreenshotHandler
+        'shortcut:clear-screenshots',
+        clearScreenshotsHandler
       )
+    }
+  }, [])
+
+  const lastCaptureTimestampRef = useRef<number>(0)
+  useEffect(() => {
+    const captureResultHandler = (
+      _event: unknown,
+      result: { dataUrl: string; timestamp: number } | null
+    ): void => {
+      if (!result || result.timestamp === lastCaptureTimestampRef.current) return
+      lastCaptureTimestampRef.current = result.timestamp
+      setPendingScreenshots((prev) => [...prev, result.dataUrl])
+    }
+    window.electron.ipcRenderer.on('capture:result', captureResultHandler)
+    return () => {
+      window.electron.ipcRenderer.removeListener('capture:result', captureResultHandler)
     }
   }, [])
 
@@ -296,7 +316,11 @@ function OverlayApp(): React.JSX.Element {
         )
       } else if (data.type === 'done') {
         setMessages((prev) =>
-          prev.map((m) => (m.id === data.requestId ? { ...m, streaming: false } : m))
+          prev.map((m) => {
+            if (m.id !== data.requestId) return m
+            if (m.text) window.api.copyToClipboard(m.text)
+            return { ...m, streaming: false }
+          })
         )
         sendingRef.current = false
         setSending(false)
@@ -345,38 +369,42 @@ function OverlayApp(): React.JSX.Element {
   }
 
   // forceScreenshot is set by the Ctrl/Cmd+Shift+H "quick send" shortcut:
-  // always attaches a screenshot regardless of the camera toggle, and falls
-  // back to a default prompt if the composer is empty, since the point of
-  // that shortcut is "capture and ask" with no typing required.
+  // captures one more screenshot on top of whatever's already queued and
+  // falls back to a default prompt if the composer is empty, since the
+  // point of that shortcut is "capture and ask" with no typing required.
   const handleSend = async (forceScreenshot = false): Promise<void> => {
-    const text = input.trim() || (forceScreenshot ? "What's on my screen?" : '')
     // `sendingRef` (not the `sending` state) guards re-entrancy: React state
     // updates are async, so a second call arriving in the same tick — e.g.
     // a global hotkey firing twice for one keypress — could still see the
     // stale `sending === false` from before `setSending(true)` flushes. The
     // ref updates synchronously, so it actually blocks the second call.
-    if (!text || sendingRef.current) return
+    if (sendingRef.current) return
+
+    // Capture client-side first so the thumbnails shown in the bubble are
+    // exactly the images that get sent to the server, not a second,
+    // separate capture.
+    const freshCapture = forceScreenshot
+      ? ((await window.api.captureScreen())?.dataUrl ?? undefined)
+      : undefined
+    const screenshotDataUrls = freshCapture
+      ? [...pendingScreenshots, freshCapture]
+      : pendingScreenshots
+    const text = input.trim() || (forceScreenshot ? "What's on my screen?" : '')
+    if (!text && screenshotDataUrls.length === 0) return
     sendingRef.current = true
 
     setInput('')
+    setPendingScreenshots([])
     setSending(true)
     // Sending your own message should always land at the bottom, even if
     // you'd scrolled up to read something earlier.
     isPinnedToBottomRef.current = true
 
-    // Capture client-side first so the thumbnail shown in the bubble is
-    // exactly the image that gets sent to the server, not a second,
-    // separate capture.
-    const screenshotDataUrl =
-      attachScreenshot || forceScreenshot
-        ? ((await window.api.captureScreen())?.dataUrl ?? undefined)
-        : undefined
-
     const userMessage: ChatMessage = {
       id: nextMessageId(),
       role: 'user',
       text,
-      screenshotDataUrl,
+      screenshotDataUrls: screenshotDataUrls.length ? screenshotDataUrls : undefined,
       timestamp: Date.now()
     }
     const assistantId = nextMessageId()
@@ -391,7 +419,7 @@ function OverlayApp(): React.JSX.Element {
 
     // Fire-and-forget — the reply streams back via 'chat:stream-event',
     // handled by the listener above, keyed on assistantId as the requestId.
-    window.api.sendChatMessageStream(assistantId, text, screenshotDataUrl)
+    window.api.sendChatMessageStream(assistantId, text, screenshotDataUrls)
   }
   useEffect(() => {
     handleSendRef.current = handleSend
@@ -431,12 +459,17 @@ function OverlayApp(): React.JSX.Element {
         {messages.length === 0 && <div className="overlay-empty">Ask anything…</div>}
         {messages.map((message) => (
           <div key={message.id} className={`overlay-bubble overlay-bubble-${message.role}`}>
-            {message.screenshotDataUrl && (
-              <img
-                className="overlay-bubble-thumb"
-                src={message.screenshotDataUrl}
-                alt="Screenshot"
-              />
+            {message.screenshotDataUrls && message.screenshotDataUrls.length > 0 && (
+              <div className="overlay-bubble-thumbs">
+                {message.screenshotDataUrls.map((url, index) => (
+                  <img
+                    key={index}
+                    className="overlay-bubble-thumb"
+                    src={url}
+                    alt={`Screenshot ${index + 1}`}
+                  />
+                ))}
+              </div>
             )}
             {message.streaming && message.text === '' ? (
               <span className="overlay-typing-inline">
@@ -461,6 +494,27 @@ function OverlayApp(): React.JSX.Element {
         </div>
       )}
 
+      {pendingScreenshots.length > 0 && (
+        <div className="overlay-pending-thumbs">
+          {pendingScreenshots.map((url, index) => (
+            <div key={index} className="overlay-pending-thumb-wrap">
+              <img
+                className="overlay-pending-thumb"
+                src={url}
+                alt={`Queued screenshot ${index + 1}`}
+              />
+              <button
+                className="overlay-pending-thumb-remove"
+                onClick={() => setPendingScreenshots((prev) => prev.filter((_, i) => i !== index))}
+                title="Remove"
+              >
+                <CrossIcon />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
       <div className="overlay-composer">
         <textarea
           value={input}
@@ -478,16 +532,19 @@ function OverlayApp(): React.JSX.Element {
             <MicIcon />
           </button>
           <button
-            className={`overlay-icon-btn${attachScreenshot ? ' overlay-icon-btn-active' : ''}`}
-            onClick={() => setAttachScreenshot((value) => !value)}
-            title="Attach a screenshot with this message"
+            className={`overlay-icon-btn${pendingScreenshots.length ? ' overlay-icon-btn-active' : ''}`}
+            onClick={async () => {
+              const result = await window.api.captureScreen()
+              if (result) setPendingScreenshots((prev) => [...prev, result.dataUrl])
+            }}
+            title="Capture a screenshot and queue it for this message"
           >
             <CameraIcon />
           </button>
           <button
             className="overlay-send-btn"
             onClick={() => handleSend()}
-            disabled={sending || !input.trim()}
+            disabled={sending || (!input.trim() && pendingScreenshots.length === 0)}
             title="Send"
           >
             <SendIcon />

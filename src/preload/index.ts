@@ -13,12 +13,13 @@ const api = {
   captureScreen: (): Promise<CaptureResult | null> => ipcRenderer.invoke('capture:screen'),
   // Fire-and-forget: progress arrives via 'chat:stream-event' IPC events
   // (delta/done/error), keyed by requestId, not this call's return value.
-  sendChatMessageStream: (requestId: string, message: string, screenshot?: string): void =>
-    ipcRenderer.send('chat:send-stream', { requestId, message, screenshot }),
+  sendChatMessageStream: (requestId: string, message: string, screenshots?: string[]): void =>
+    ipcRenderer.send('chat:send-stream', { requestId, message, screenshots }),
   toggleMinimize: (): void => ipcRenderer.send('overlay:toggle-minimize'),
   quitApp: (): void => ipcRenderer.send('app:quit'),
   transcribeAudio: (audio: string, mimeType: string): Promise<{ text: string; error?: string }> =>
-    ipcRenderer.invoke('audio:transcribe', { audio, mimeType })
+    ipcRenderer.invoke('audio:transcribe', { audio, mimeType }),
+  copyToClipboard: (text: string): void => ipcRenderer.send('clipboard:write', text)
 }
 
 // Use `contextBridge` APIs to expose Electron APIs to

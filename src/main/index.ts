@@ -5,7 +5,8 @@ import {
   ipcMain,
   globalShortcut,
   desktopCapturer,
-  screen
+  screen,
+  clipboard
 } from 'electron'
 import { join } from 'path'
 import { mkdir, writeFile } from 'fs/promises'
@@ -93,7 +94,18 @@ async function captureScreen(): Promise<CaptureResult | null> {
   }
 }
 
+// Windows repeats the WM_HOTKEY message for as long as the key combo stays
+// held, so a single "press" of a global shortcut can fire this more than
+// once a few hundred ms apart. Debounce so one physical press only ever
+// queues one screenshot.
+let lastCaptureAt = 0
+const CAPTURE_DEBOUNCE_MS = 800
+
 async function triggerCaptureFromShortcut(): Promise<void> {
+  const now = Date.now()
+  if (now - lastCaptureAt < CAPTURE_DEBOUNCE_MS) return
+  lastCaptureAt = now
+
   const result = await captureScreen()
   if (!result || !overlayWindow) return
   overlayWindow.webContents.send('capture:result', result)
@@ -107,7 +119,7 @@ async function streamChatMessage(
   sender: Electron.WebContents,
   requestId: string,
   message: string,
-  screenshot?: string
+  screenshots?: string[]
 ): Promise<void> {
   let finished = false
   const emit = (event: ChatStreamEvent): void => {
@@ -123,7 +135,7 @@ async function streamChatMessage(
     response = await fetch(CHAT_STREAM_SERVER_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message, screenshot })
+      body: JSON.stringify({ message, screenshots })
     })
   } catch (error) {
     const text = error instanceof Error ? error.message : 'Unknown error contacting chat server'
@@ -422,8 +434,8 @@ app.whenReady().then(() => {
 
   ipcMain.on(
     'chat:send-stream',
-    (event, payload: { requestId: string; message: string; screenshot?: string }) => {
-      void streamChatMessage(event.sender, payload.requestId, payload.message, payload.screenshot)
+    (event, payload: { requestId: string; message: string; screenshots?: string[] }) => {
+      void streamChatMessage(event.sender, payload.requestId, payload.message, payload.screenshots)
     }
   )
 
@@ -432,12 +444,24 @@ app.whenReady().then(() => {
   ipcMain.handle('audio:transcribe', (_event, payload: { audio: string; mimeType: string }) =>
     transcribeAudio(payload.audio, payload.mimeType)
   )
+  // Main-process clipboard write, used instead of navigator.clipboard in the
+  // renderer: the web Clipboard API silently no-ops when the overlay window
+  // isn't OS-focused, which is exactly the case for the Ctrl/Cmd+Shift+H
+  // quick-send shortcut (used while another app has focus).
+  ipcMain.on('clipboard:write', (_event, text: string) => clipboard.writeText(text))
 
   createOverlayWindow()
 
   globalShortcut.register('CommandOrControl+Shift+Space', toggleOverlayVisibility)
   globalShortcut.register('CommandOrControl+Shift+I', toggleOverlayInteractive)
+  // Captures a screenshot and adds it to the composer's pending queue (does
+  // not send). Press it multiple times to queue up several screenshots for
+  // one message; Ctrl/Cmd+Shift+9 sends whatever's queued. G is a plain
+  // alias for the same action (does not touch the OS's own screenshot tool).
   globalShortcut.register('CommandOrControl+Shift+S', () => {
+    void triggerCaptureFromShortcut()
+  })
+  globalShortcut.register('CommandOrControl+Shift+G', () => {
     void triggerCaptureFromShortcut()
   })
   globalShortcut.register('CommandOrControl+Shift+M', toggleOverlayMinimize)
@@ -461,9 +485,10 @@ app.whenReady().then(() => {
   globalShortcut.register('CommandOrControl+Shift+5', toggleOverlayFullSize)
   globalShortcut.register('CommandOrControl+Shift+N', () => app.quit())
 
-  // 7: toggle mic dictation on/off. 8: clear the composer. 9: send whatever
-  // is currently typed. 0: toggle the "attach a screenshot" flag. All four
-  // are pushed to the renderer, which owns the actual composer/mic state.
+  // 7: toggle mic dictation on/off. 8: clear the composer text. 9: send
+  // whatever's typed plus any queued screenshots. 0: clear the queued
+  // screenshots without sending. All four are pushed to the renderer, which
+  // owns the actual composer/mic/screenshot-queue state.
   globalShortcut.register('CommandOrControl+Shift+7', () => {
     overlayWindow?.webContents.send('shortcut:mic-toggle')
   })
@@ -474,7 +499,7 @@ app.whenReady().then(() => {
     overlayWindow?.webContents.send('shortcut:send')
   })
   globalShortcut.register('CommandOrControl+Shift+0', () => {
-    overlayWindow?.webContents.send('shortcut:toggle-screenshot')
+    overlayWindow?.webContents.send('shortcut:clear-screenshots')
   })
 
   app.on('activate', function () {

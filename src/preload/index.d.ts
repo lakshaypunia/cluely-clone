@@ -9,10 +9,11 @@ interface CaptureResult {
 
 interface Api {
   captureScreen: () => Promise<CaptureResult | null>
-  sendChatMessageStream: (requestId: string, message: string, screenshot?: string) => void
+  sendChatMessageStream: (requestId: string, message: string, screenshots?: string[]) => void
   toggleMinimize: () => void
   quitApp: () => void
   transcribeAudio: (audio: string, mimeType: string) => Promise<{ text: string; error?: string }>
+  copyToClipboard: (text: string) => void
 }
 
 declare global {

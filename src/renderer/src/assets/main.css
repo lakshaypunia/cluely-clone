@@ -468,14 +468,63 @@ html.overlay-mode #root {
   }
 }
 
+.overlay-bubble-thumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
 .overlay-bubble-thumb {
   display: block;
   max-width: 100%;
   max-height: 110px;
   width: auto;
   border-radius: 8px;
-  margin-bottom: 6px;
   border: 1px solid rgba(0, 0, 0, 0.15);
+}
+
+.overlay-pending-thumbs {
+  -webkit-app-region: no-drag;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 12px 0;
+  flex-shrink: 0;
+}
+
+.overlay-pending-thumb-wrap {
+  position: relative;
+}
+
+.overlay-pending-thumb {
+  display: block;
+  height: 48px;
+  width: auto;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+.overlay-pending-thumb-remove {
+  -webkit-app-region: no-drag;
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(0, 0, 0, 0.75);
+  color: #fff;
+  cursor: pointer;
+  padding: 0;
+}
+
+.overlay-pending-thumb-remove:hover {
+  background: rgba(0, 0, 0, 0.9);
 }
 
 .overlay-mic-status {
