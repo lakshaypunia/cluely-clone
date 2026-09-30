@@ -11,6 +11,7 @@ import {
 import { join } from 'path'
 import { mkdir, writeFile } from 'fs/promises'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
+import { startRemoteServer } from './remote'
 
 let overlayWindow: BrowserWindow | null = null
 // Interactive by default so the chat is usable immediately without needing
@@ -56,6 +57,14 @@ const CHAT_SERVER_URL =
   process.env.CLUELY_CHAT_SERVER_URL ?? 'https://cluely-server-3un1.onrender.com/api/chat'
 const CHAT_STREAM_SERVER_URL = `${CHAT_SERVER_URL}/stream`
 const TRANSCRIBE_SERVER_URL = CHAT_SERVER_URL.replace(/\/chat$/, '/transcribe')
+const REMOTE_PORT = Number(process.env.CLUELY_REMOTE_PORT ?? 4545)
+
+// Mirrors of state the phone remote displays. The chat reply is tracked
+// here as it streams through main; composer/mic/queue state is owned by the
+// renderer and reported back via 'remote:renderer-state'.
+let lastReply: { requestId: string; text: string; streaming: boolean; error?: string } | null =
+  null
+let rendererState = { pendingScreenshots: 0, micRecording: false, sending: false }
 
 async function captureScreen(): Promise<CaptureResult | null> {
   const display = screen.getPrimaryDisplay()
@@ -122,10 +131,16 @@ async function streamChatMessage(
   screenshots?: string[]
 ): Promise<void> {
   let finished = false
+  lastReply = { requestId, text: '', streaming: true }
   const emit = (event: ChatStreamEvent): void => {
     if (event.type !== 'delta') {
       if (finished) return
       finished = true
+    }
+    if (lastReply?.requestId === requestId) {
+      if (event.type === 'delta') lastReply.text += event.text
+      else lastReply.streaming = false
+      if (event.type === 'error') lastReply.error = event.message
     }
     if (!sender.isDestroyed()) sender.send('chat:stream-event', event)
   }
@@ -452,54 +467,86 @@ app.whenReady().then(() => {
 
   createOverlayWindow()
 
-  globalShortcut.register('CommandOrControl+Shift+Space', toggleOverlayVisibility)
-  globalShortcut.register('CommandOrControl+Shift+I', toggleOverlayInteractive)
-  // Captures a screenshot and adds it to the composer's pending queue (does
-  // not send). Press it multiple times to queue up several screenshots for
-  // one message; Ctrl/Cmd+Shift+9 sends whatever's queued. G is a plain
-  // alias for the same action (does not touch the OS's own screenshot tool).
-  globalShortcut.register('CommandOrControl+Shift+S', () => {
-    void triggerCaptureFromShortcut()
-  })
-  globalShortcut.register('CommandOrControl+Shift+G', () => {
-    void triggerCaptureFromShortcut()
-  })
-  globalShortcut.register('CommandOrControl+Shift+M', toggleOverlayMinimize)
-  globalShortcut.register('CommandOrControl+Shift+H', () => {
-    overlayWindow?.webContents.send('shortcut:quick-send')
-  })
-  globalShortcut.register('CommandOrControl+Shift+R', () => {
-    overlayWindow?.webContents.send('shortcut:scroll', 'up')
-  })
-  globalShortcut.register('CommandOrControl+Shift+Y', () => {
-    overlayWindow?.webContents.send('shortcut:scroll', 'down')
+  // Single source of truth for every overlay action. Global shortcuts and
+  // the phone remote both call straight into this map, so the phone never
+  // has to fake key presses. Renderer-owned actions (composer, mic,
+  // screenshot queue, scrolling) are pushed over IPC exactly like the
+  // shortcuts always have.
+  const sendToOverlay = (channel: string, ...args: unknown[]): void => {
+    overlayWindow?.webContents.send(channel, ...args)
+  }
+  const remoteCommands: Record<string, () => void> = {
+    // Captures a screenshot and adds it to the composer's pending queue
+    // (does not send). Trigger several times to queue up multiple
+    // screenshots for one message; 'send' sends whatever's queued.
+    screenshot: () => void triggerCaptureFromShortcut(),
+    'quick-send': () => sendToOverlay('shortcut:quick-send'),
+    send: () => sendToOverlay('shortcut:send'),
+    'clear-screenshots': () => sendToOverlay('shortcut:clear-screenshots'),
+    'clear-input': () => sendToOverlay('shortcut:clear-input'),
+    'mic-toggle': () => sendToOverlay('shortcut:mic-toggle'),
+    'scroll-up': () => sendToOverlay('shortcut:scroll', 'up'),
+    'scroll-down': () => sendToOverlay('shortcut:scroll', 'down'),
+    'toggle-visibility': toggleOverlayVisibility,
+    'toggle-interactive': toggleOverlayInteractive,
+    'toggle-minimize': toggleOverlayMinimize,
+    'toggle-fullsize': toggleOverlayFullSize,
+    'move-left': () => moveOverlay(-MOVE_STEP, 0),
+    'move-right': () => moveOverlay(MOVE_STEP, 0),
+    'move-up': () => moveOverlay(0, -MOVE_STEP),
+    'move-down': () => moveOverlay(0, MOVE_STEP),
+    quit: () => app.quit()
+  }
+
+  const shortcuts: Record<string, string> = {
+    'CommandOrControl+Shift+Space': 'toggle-visibility',
+    'CommandOrControl+Shift+I': 'toggle-interactive',
+    // G is a plain alias for S (does not touch the OS's own screenshot tool).
+    'CommandOrControl+Shift+S': 'screenshot',
+    'CommandOrControl+Shift+G': 'screenshot',
+    'CommandOrControl+Shift+M': 'toggle-minimize',
+    'CommandOrControl+Shift+H': 'quick-send',
+    'CommandOrControl+Shift+R': 'scroll-up',
+    'CommandOrControl+Shift+Y': 'scroll-down',
+    // Numbered commands: 1-4 nudge the overlay around the screen, 5 toggles
+    // full/original size. Quit is N (not a number, so it can't collide with
+    // a future numbered command).
+    'CommandOrControl+Shift+1': 'move-left',
+    'CommandOrControl+Shift+2': 'move-right',
+    'CommandOrControl+Shift+3': 'move-up',
+    'CommandOrControl+Shift+4': 'move-down',
+    'CommandOrControl+Shift+5': 'toggle-fullsize',
+    'CommandOrControl+Shift+N': 'quit',
+    // 7: mic dictation on/off. 8: clear the composer text. 9: send what's
+    // typed plus any queued screenshots. 0: clear the queued screenshots.
+    'CommandOrControl+Shift+7': 'mic-toggle',
+    'CommandOrControl+Shift+8': 'clear-input',
+    'CommandOrControl+Shift+9': 'send',
+    'CommandOrControl+Shift+0': 'clear-screenshots'
+  }
+  for (const [accelerator, command] of Object.entries(shortcuts)) {
+    globalShortcut.register(accelerator, remoteCommands[command])
+  }
+
+  ipcMain.on('remote:renderer-state', (_event, state: typeof rendererState) => {
+    rendererState = state
   })
 
-  // Numbered commands: 1-4 nudge the overlay around the screen, 5 toggles
-  // full/original size. Quit is Ctrl/Cmd+Shift+N (not a number, so it can't
-  // collide with a future numbered command).
-  globalShortcut.register('CommandOrControl+Shift+1', () => moveOverlay(-MOVE_STEP, 0))
-  globalShortcut.register('CommandOrControl+Shift+2', () => moveOverlay(MOVE_STEP, 0))
-  globalShortcut.register('CommandOrControl+Shift+3', () => moveOverlay(0, -MOVE_STEP))
-  globalShortcut.register('CommandOrControl+Shift+4', () => moveOverlay(0, MOVE_STEP))
-  globalShortcut.register('CommandOrControl+Shift+5', toggleOverlayFullSize)
-  globalShortcut.register('CommandOrControl+Shift+N', () => app.quit())
-
-  // 7: toggle mic dictation on/off. 8: clear the composer text. 9: send
-  // whatever's typed plus any queued screenshots. 0: clear the queued
-  // screenshots without sending. All four are pushed to the renderer, which
-  // owns the actual composer/mic/screenshot-queue state.
-  globalShortcut.register('CommandOrControl+Shift+7', () => {
-    overlayWindow?.webContents.send('shortcut:mic-toggle')
-  })
-  globalShortcut.register('CommandOrControl+Shift+8', () => {
-    overlayWindow?.webContents.send('shortcut:clear-input')
-  })
-  globalShortcut.register('CommandOrControl+Shift+9', () => {
-    overlayWindow?.webContents.send('shortcut:send')
-  })
-  globalShortcut.register('CommandOrControl+Shift+0', () => {
-    overlayWindow?.webContents.send('shortcut:clear-screenshots')
+  startRemoteServer({
+    port: REMOTE_PORT,
+    tokenFile: join(app.getPath('userData'), 'remote-token.txt'),
+    commands: remoteCommands,
+    sendText: (text) => sendToOverlay('remote:send-text', text),
+    getState: () => ({
+      overlay: {
+        visible: overlayWindow?.isVisible() ?? false,
+        minimized: overlayMinimized,
+        interactive: overlayInteractive,
+        fullSize: isFullSize
+      },
+      renderer: rendererState,
+      lastReply
+    })
   })
 
   app.on('activate', function () {

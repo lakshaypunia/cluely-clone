@@ -7,3 +7,4 @@ out
 server/secrets.json
 *.lnk
 
+server/.env

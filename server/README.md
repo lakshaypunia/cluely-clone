@@ -35,6 +35,15 @@ If both `GEMINI_API_KEY` env var and a service-account `secrets.json` are
 present, the env var wins. `geminiModel`/`GEMINI_MODEL` likewise override
 whatever's in the file.
 
+## System prompt
+
+The chat system prompt lives in `server/.env` (gitignored), not in the
+code. Copy `server/.env.example` to `server/.env` and edit `SYSTEM_PROMPT`.
+Wrap the value in backticks so it can span multiple lines and contain
+quotes. On a host like Render, set `SYSTEM_PROMPT` as an environment
+variable instead — real env vars override the file. Restart the server
+after editing.
+
 ## Run
 
 ```

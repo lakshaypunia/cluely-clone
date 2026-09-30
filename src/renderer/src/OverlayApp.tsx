@@ -150,7 +150,9 @@ function OverlayApp(): React.JSX.Element {
   // through a ref (updated on every render below, right after handleSend is
   // defined) so this one-time subscription always calls the latest
   // handleSend closure instead of a stale one.
-  const handleSendRef = useRef<(forceScreenshot?: boolean) => Promise<void>>(async () => {})
+  const handleSendRef = useRef<(forceScreenshot?: boolean, overrideText?: string) => Promise<void>>(
+    async () => {}
+  )
   useEffect(() => {
     const quickSendHandler = (): void => {
       void handleSendRef.current(true)
@@ -158,6 +160,18 @@ function OverlayApp(): React.JSX.Element {
     window.electron.ipcRenderer.on('shortcut:quick-send', quickSendHandler)
     return () => {
       window.electron.ipcRenderer.removeListener('shortcut:quick-send', quickSendHandler)
+    }
+  }, [])
+
+  // Phone remote: a message typed on the phone is sent as-is (along with
+  // any queued screenshots), without touching whatever's in the composer.
+  useEffect(() => {
+    const remoteSendHandler = (_event: unknown, text: string): void => {
+      void handleSendRef.current(false, text)
+    }
+    window.electron.ipcRenderer.on('remote:send-text', remoteSendHandler)
+    return () => {
+      window.electron.ipcRenderer.removeListener('remote:send-text', remoteSendHandler)
     }
   }, [])
 
@@ -372,7 +386,7 @@ function OverlayApp(): React.JSX.Element {
   // captures one more screenshot on top of whatever's already queued and
   // falls back to a default prompt if the composer is empty, since the
   // point of that shortcut is "capture and ask" with no typing required.
-  const handleSend = async (forceScreenshot = false): Promise<void> => {
+  const handleSend = async (forceScreenshot = false, overrideText?: string): Promise<void> => {
     // `sendingRef` (not the `sending` state) guards re-entrancy: React state
     // updates are async, so a second call arriving in the same tick — e.g.
     // a global hotkey firing twice for one keypress — could still see the
@@ -389,11 +403,12 @@ function OverlayApp(): React.JSX.Element {
     const screenshotDataUrls = freshCapture
       ? [...pendingScreenshots, freshCapture]
       : pendingScreenshots
-    const text = input.trim() || (forceScreenshot ? "What's on my screen?" : '')
+    const text =
+      overrideText?.trim() || input.trim() || (forceScreenshot ? "What's on my screen?" : '')
     if (!text && screenshotDataUrls.length === 0) return
     sendingRef.current = true
 
-    setInput('')
+    if (overrideText === undefined) setInput('')
     setPendingScreenshots([])
     setSending(true)
     // Sending your own message should always land at the bottom, even if
@@ -424,6 +439,15 @@ function OverlayApp(): React.JSX.Element {
   useEffect(() => {
     handleSendRef.current = handleSend
   })
+
+  // Keep the phone remote's status chips in sync with renderer-owned state.
+  useEffect(() => {
+    window.electron.ipcRenderer.send('remote:renderer-state', {
+      pendingScreenshots: pendingScreenshots.length,
+      micRecording,
+      sending
+    })
+  }, [pendingScreenshots.length, micRecording, sending])
 
   const handleComposerKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>): void => {
     if (event.key === 'Enter' && !event.shiftKey) {
